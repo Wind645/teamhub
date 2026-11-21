@@ -94,11 +94,24 @@ The sender is derived from the URL and cannot be supplied as a tool argument.
 
 ## Lifecycle hooks
 
-Hooks are Codex-side adapters and are not implemented by this repository yet.
-When added, they should invoke MCP tools through an MCP client and translate the
-results into `additionalContext` or a blocking decision. Hook definitions belong
-in each Codex Home's `config.toml`; their implementation belongs outside the MCP
-server.
+This repository includes `src/hook.ts`, built to `dist/hook.js`. Hook definitions
+remain in each Codex Home's `config.toml`, while the shared hook implementation
+uses an MCP client to call Team Hub.
+
+The current hook handles:
+
+- `SessionStart` by injecting active peer state.
+- `UserPromptSubmit` by publishing raw intent, reading updates, and injecting
+  peer state plus instructions to summarize intent before mutating work.
+- `PreToolUse` for `Bash|apply_patch` by enforcing a summarized state, detecting
+  planned path overlap, and warning about concurrent work on the same branch.
+- `PostToolUse` by refreshing cwd, repository, branch, and status.
+- `Stop`, `Interrupt`, and `SessionEnd` by marking the peer idle, interrupted, or
+  offline.
+
+The hook fails open by default when Team Hub is unavailable so an offline local
+service does not block Codex. Set `TEAMHUB_HOOK_FAIL_CLOSED=1` in the Codex
+process environment to make hook failures block mutations instead.
 
 ## Tests
 
@@ -111,5 +124,5 @@ npm test
 
 This MVP trusts the peer ID in the URL and does not authenticate callers. Any
 local process that connects to `/mcp/alice` is treated as Alice. Use loopback
-only. Push claims, workspace locking, automatic hooks, and remote transport
-authentication are not implemented.
+only. Atomic push claims, workspace locking, and remote transport authentication
+are not implemented.
