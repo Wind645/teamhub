@@ -1,0 +1,8 @@
+{
+  "model": {
+    "protocol": "responses",
+    "endpoint": "https://sustech-ooad.dns.navy:19443/responses",
+    "name": "deepseek-flash",
+    "keyEnv": "TOY_HARNESS_DEEPSEEK_API_KEY"
+  }
+}

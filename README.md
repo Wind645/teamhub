@@ -15,6 +15,11 @@ configured in each Codex Home through its MCP URL.
 
 ## Requirements
 
+For the independent model runtime, see [Toy Harness](toy-harness/README.md).
+Its guide includes Windows and Linux setup, a two-peer messaging walkthrough,
+and offline demos. The runtime connects to this service using MCP and the
+existing hook executable.
+
 Node.js 22 or newer is required. This project uses Node's built-in SQLite module.
 
 ## Start Team Hub

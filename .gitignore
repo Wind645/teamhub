@@ -4,3 +4,7 @@ data/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+
+# Local Codex configuration containing credentials
+/examples/config.alice.local.toml
+/examples/config.alice.local.toml*
