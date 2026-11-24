@@ -18,9 +18,10 @@ const api: Api = {
     return () => ipcRenderer.off("teamhub:state", handler);
   },
   folder: () => invoke("folder"),
-  create: (path, text) => invoke("create", path, text),
+  create: (path, text, approvalMode) => invoke("create", path, text, approvalMode),
   importSession: () => invoke("importSession"),
   select: id => invoke("select", id),
+  setApprovalMode: (id, mode) => invoke("setApprovalMode", id, mode),
   command: (id, command) => invoke("command", id, command),
   retry: id => invoke("retry", id),
   peers: id => invoke("peers", id),

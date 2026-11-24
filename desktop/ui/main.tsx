@@ -1,9 +1,9 @@
 import React, { useEffect, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import { ArrowUp, Check, ChevronDown, CircleAlert, Clock, FileText, Folder, FolderOpen, History, LoaderCircle, Menu, Plus, RotateCcw, Settings, Square, Terminal, Users, X } from "lucide-react";
+import { ArrowUp, Check, ChevronDown, CircleAlert, Clock, FileText, Folder, FolderOpen, Hand, History, LoaderCircle, Menu, Plus, RotateCcw, Settings, ShieldAlert, ShieldCheck, Square, Terminal, Users, X } from "lucide-react";
 import Markdown from "react-markdown";
 import gfm from "remark-gfm";
-import type { Api, Command, Issue, LocalMember, Member, Pending, Profile, SessionState, Snapshot } from "../src/protocol";
+import { approvalModes, type Api, type ApprovalMode, type Command, type Issue, type LocalMember, type Member, type Pending, type Profile, type SessionState, type Snapshot } from "../src/protocol";
 import type { Event } from "../../toy-harness/src/journal";
 import { timelineRows } from "./timeline";
 import "./style.css";
@@ -14,6 +14,11 @@ const name = (member?: Member) => member?.peer ?? "助手";
 const base = (path: string) => path.replace(/[\\/]+$/, "").split(/[\\/]/).at(-1) || path;
 const phases: Record<string, string> = { running: "运行中", completed: "已完成", interrupted: "已中断", failed: "失败", paused: "已暂停", idle: "就绪" };
 const issueNames = { credential: "缺少模型密钥", model: "模型连接失败", hub: "Hub 离线", session: "会话不可用" };
+const approvalOptions = {
+  request: { label: "请求批准", detail: "逐次确认需要审批的工具调用。", icon: Hand },
+  auto: { label: "自动审批", detail: "工作区补丁自动通过，Shell 和需审批的协作操作仍需确认。", icon: ShieldCheck },
+  full: { label: "完全访问", detail: "跳过手动审批，Shell 使用当前系统用户的权限。", icon: ShieldAlert },
+};
 const stringify = (value: unknown) => typeof value === "string" ? value : JSON.stringify(value, null, 2) ?? "";
 const friendly = (text: string) => ({
   "Denied by local tool policy": "已按本地工具权限拒绝",
@@ -153,6 +158,42 @@ function NewConversation({ open, profile, report }: {
   </section></div>;
 }
 
+function ApprovalPicker({ mode, disabled, running, select }: {
+  mode: ApprovalMode; disabled: boolean; running: boolean; select: (mode: ApprovalMode) => void;
+}) {
+  const picker = useRef<HTMLDetailsElement>(null);
+  const trigger = useRef<HTMLElement>(null);
+  const CurrentIcon = approvalOptions[mode].icon;
+  const close = () => {
+    if (picker.current) picker.current.open = false;
+    trigger.current?.focus();
+  };
+  return <details className="approval-picker" ref={picker}
+    onBlur={event => {
+      if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false;
+    }}
+    onKeyDown={event => {
+      if (event.key === "Escape" && picker.current?.open) { event.preventDefault(); close(); }
+    }}>
+    <summary ref={trigger} aria-label={`工具权限：${approvalOptions[mode].label}`} aria-disabled={disabled}
+      data-mode={mode} onClick={event => { if (disabled) event.preventDefault(); }}>
+      <CurrentIcon size={15} aria-hidden="true" />{approvalOptions[mode].label}<ChevronDown size={13} aria-hidden="true" />
+    </summary>
+    <div className="approval-options" role="group" aria-label="工具权限">
+      <div className="approval-options-heading">{running ? "下次运行时生效" : "此对话的工具权限"}</div>
+      {approvalModes.map(value => {
+        const { label, detail, icon: Icon } = approvalOptions[value];
+        return <button key={value} type="button" data-mode={value} aria-label={label} aria-pressed={mode === value}
+          disabled={disabled} onClick={() => { close(); select(value); }}>
+          <Icon size={17} aria-hidden="true" />
+          <span><strong>{label}</strong><small>{detail}</small></span>
+          {mode === value && <Check size={16} aria-hidden="true" />}
+        </button>;
+      })}
+    </div>
+  </details>;
+}
+
 function ModelSettings({ snapshot, close, report }: { snapshot: Snapshot; close: () => void; report: (value: unknown) => void }) {
   const [profile, setProfile] = useState(snapshot.profile);
   const [key, setKey] = useState("");
@@ -254,6 +295,8 @@ function App() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [sending, setSending] = useState<string>();
   const [newChat, setNewChat] = useState<{ path?: string }>();
+  const [draftApprovalMode, setDraftApprovalMode] = useState<ApprovalMode>("request");
+  const [savingApproval, setSavingApproval] = useState(false);
   const [newIssue, setNewIssue] = useState<Issue>();
   const [creating, setCreating] = useState(false);
   const scroll = useRef<HTMLDivElement>(null);
@@ -292,6 +335,7 @@ function App() {
   const draftKey = id ?? "";
   const draft = drafts[draftKey] ?? "";
   const cwd = member?.cwd ?? newChat?.path;
+  const approvalMode = member ? member.approvalMode ?? "request" : draftApprovalMode;
   const report = (error: unknown) => setErrors(previous => ({ ...previous, [id ?? ""]: error instanceof Error ? error.message : String(error) }));
   const send = (command: Command) => id ? api.command(id, command) : Promise.resolve(undefined);
   const focusPending = () => {
@@ -307,6 +351,7 @@ function App() {
   };
   const closeDraft = () => {
     setNewChat(undefined);
+    setDraftApprovalMode("request");
     setNewIssue(undefined);
     setDrafts(previous => ({ ...previous, "": "" }));
     setErrors(previous => ({ ...previous, "": "" }));
@@ -319,14 +364,14 @@ function App() {
     setModal(undefined);
   };
   const submit = async () => {
-    if (!draft.trim()) return;
+    if (!draft.trim() || savingApproval) return;
     if (!id) {
       if (!cwd || creating) return;
       setCreating(true);
       setNewIssue(undefined);
       setErrors(previous => ({ ...previous, "": "" }));
       try {
-        const result = await api.create(cwd, draft.trim());
+        const result = await api.create(cwd, draft.trim(), approvalMode);
         if ("issue" in result) setNewIssue(result.issue);
         else {
           setSnapshot(await api.state());
@@ -344,6 +389,14 @@ function App() {
       setDrafts(previous => previous[id] === draft ? { ...previous, [id]: "" } : previous);
     } catch (error) { report(error); }
     finally { setSending(previous => previous === id ? undefined : previous); }
+  };
+  const selectApprovalMode = async (next: ApprovalMode) => {
+    if (next === approvalMode) return;
+    if (!id) { setDraftApprovalMode(next); return; }
+    setSavingApproval(true);
+    try { await api.setApprovalMode(id, next); }
+    catch (error) { report(error); }
+    finally { setSavingApproval(false); }
   };
   useLayoutEffect(() => {
     const element = scroll.current;
@@ -474,11 +527,15 @@ function App() {
                   void submit();
                 }} />
               <div className="composer-controls">
-                <Status state={creating ? { phase: "starting", events: [] } : state} />
+                <div className="composer-context">
+                  <ApprovalPicker key={id ?? "draft"} mode={approvalMode} disabled={creating || savingApproval} running={running}
+                    select={next => void selectApprovalMode(next)} />
+                  <Status state={creating ? { phase: "starting", events: [] } : state} />
+                </div>
                 <div className="actions">
-                  {resumable && <button onClick={() => void send({ type: "resume" }).catch(report)}><RotateCcw size={14} />继续此回合</button>}
+                  {resumable && <button disabled={savingApproval} onClick={() => void send({ type: "resume" }).catch(report)}><RotateCcw size={14} />继续此回合</button>}
                   {running && <button onClick={() => void send({ type: "interrupt" }).catch(report)}><Square size={13} />中断</button>}
-                  <button className="primary" disabled={!draft.trim() || creating || Boolean(id && (sending === id || state?.phase !== "ready"))} onClick={() => void submit()}>
+                  <button className="primary" disabled={!draft.trim() || creating || savingApproval || Boolean(id && (sending === id || state?.phase !== "ready"))} onClick={() => void submit()}>
                     <ArrowUp size={16} />{running ? "追加指令" : "发送"}</button>
                 </div>
               </div>

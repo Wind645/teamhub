@@ -6,7 +6,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import type { Event } from "../../toy-harness/src/journal.js";
 import schoolPreset from "../../toy-harness/examples/sustech.deepseek.json";
 import type { ModelConfig } from "../../toy-harness/src/model.js";
-import type { Api, Command, Conversation, Issue, Member, Peer, Profile, SessionState, Snapshot, WorkerMessage, WorkerRequest } from "./protocol.js";
+import { approvalModes, type Api, type ApprovalMode, type Command, type Conversation, type Issue, type Member, type Peer, type Profile, type SessionState, type Snapshot, type WorkerMessage, type WorkerRequest } from "./protocol.js";
 import { initialProfile, migrateIndex, peerId, type MemberIndex, type MemberRecord } from "./members.js";
 import { memberPet, PetActivity, type PetPreferences } from "./pet-state.js";
 import { PetWindow } from "./pet-window.js";
@@ -140,13 +140,23 @@ function load() {
       persist();
     }
   }
+  let movedApprovalMode = false;
   for (const record of index.members) {
+    const { approvalMode, ...profile } = record.profile as Profile & { approvalMode?: ApprovalMode };
+    if (approvalMode !== undefined) {
+      if (approvalModes.includes(approvalMode)) {
+        for (const member of conversationsOf(record)) member.approvalMode ??= approvalMode;
+      }
+      record.profile = profile;
+      movedApprovalMode = true;
+    }
     for (const member of conversationsOf(record)) sessions[member.id] = restore(member);
     if (secureStorageAvailable() && existsSync(keyPath(record.peer))) {
       try { credentials.set(record.peer, JSON.parse(safeStorage.decryptString(readFileSync(keyPath(record.peer))))); }
       catch (cause) { console.error("Could not restore model credential", String(cause)); }
     }
   }
+  if (movedApprovalMode) persist();
 }
 const snapshot = (record: MemberRecord): Snapshot => ({
   peer: record.peer, profile: { ...record.profile, externalHub: index.externalHub },
@@ -497,12 +507,13 @@ function memberApi(owner: MemberWindow): Omit<Api, "subscribe" | "members" | "op
       const result = await dialog.showOpenDialog(window, { properties: ["openDirectory"], title: "选择项目文件夹", defaultPath: record.cwd });
       return result.canceled ? undefined : result.filePaths[0];
     },
-    async create(path, text) {
+    async create(path, text, approvalMode = "request") {
       validatePrompt(text);
+      if (!approvalModes.includes(approvalMode)) throw new Error("权限模式无效");
       if (typeof path !== "string" || !isAbsolute(path)) throw new Error("请选择工作目录");
       const cwd = realpathSync(path);
       if (!statSync(cwd).isDirectory()) throw new Error("工作目录不可用");
-      const member = { id: randomUUID(), cwd, peer: record.peer };
+      const member = { id: randomUUID(), cwd, peer: record.peer, approvalMode };
       const { id } = member;
       const state = restore(member);
       try { checkNewTurn(record); }
@@ -512,7 +523,7 @@ function memberApi(owner: MemberWindow): Omit<Api, "subscribe" | "members" | "op
       sessions[id] = state;
       try {
         const worker = start(record, member);
-        try { await worker.send({ type: "submit", text }); }
+        try { await worker.send({ type: "submit", text, approvalMode }); }
         catch (cause) { if (!state.events.some(event => event.type === "user")) throw cause; }
         if (!state.events.some(event => event.type === "user")) throw state.issue ?? error("session", "首条消息未写入，请重试。");
         record.conversations.unshift({ id: randomUUID(), created: Date.now(), members: [member] });
@@ -553,6 +564,15 @@ function memberApi(owner: MemberWindow): Omit<Api, "subscribe" | "members" | "op
       return add(owner, { id: randomUUID(), created: Date.now(), members: [{ id, cwd, directory: dirname(file), peer: record.peer }] });
     },
     async select(id) { select(owner, id); },
+    async setApprovalMode(id, mode) {
+      const member = id === record.active ? memberOf(record, id) : undefined;
+      if (!member || !approvalModes.includes(mode)) throw new Error("无效的会话或权限模式");
+      const previous = member.approvalMode;
+      member.approvalMode = mode;
+      try { persist(); }
+      catch (error) { member.approvalMode = previous; throw error; }
+      publish(record.peer);
+    },
     async command(id, command) {
       if (owner.saving || owner.closing || changingHub || quitting) throw new Error("应用正在切换状态，请稍后重试");
       if (id !== record.active) throw new Error("操作只适用于当前会话");
@@ -572,7 +592,7 @@ function memberApi(owner: MemberWindow): Omit<Api, "subscribe" | "members" | "op
         }
         state.issue = undefined;
         startingTurns.add(record.peer);
-        try { return await start(record, member).send(command); }
+        try { return await start(record, member).send({ ...command, approvalMode: member.approvalMode }); }
         finally { startingTurns.delete(record.peer); }
       }
       return start(record, member).send(command);
@@ -769,7 +789,7 @@ function registerApi() {
   };
   const channels: Array<keyof Omit<Api, "subscribe">> = [
     "members", "openMember", "memberPicker", "state", "folder", "create", "importSession",
-    "select", "command", "retry", "peers", "importProfile", "saveProfile", "artifact", "confirm", "setPetsEnabled",
+    "select", "setApprovalMode", "command", "retry", "peers", "importProfile", "saveProfile", "artifact", "confirm", "setPetsEnabled",
   ];
   for (const name of channels) ipcMain.handle("teamhub:" + name, async (event, ...args) => {
     try {

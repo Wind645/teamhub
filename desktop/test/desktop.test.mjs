@@ -328,6 +328,78 @@ async function settled(page, status = "completed") {
   await expect.poll(async () => (await current(page))?.events.findLast(e => e.type === "status")?.data, { timeout: 15_000 }).toBe(status);
 }
 
+test("composer approval modes are independent per conversation and persist across restarts", { timeout: 85_000 }, async () => {
+  const data = await appData();
+  const project = join(data, "permissions project");
+  await cp(join(repo, "toy-harness/demo/fixtures/code"), project, { recursive: true });
+  let running = await launch(data, [project]);
+  const picker = page => page.locator(".composer summary");
+  const options = page => page.getByRole("group", { name: "工具权限", exact: true });
+  const chooseMode = async (page, name) => {
+    await picker(page).click();
+    await options(page).getByRole("button", { name, exact: true }).click();
+    await expect(picker(page)).toHaveText(name);
+  };
+  const report = page => page.locator(".session-button").filter({ hasText: "生成一份报告" });
+  const revision = page => page.locator(".session-button").filter({ hasText: "修订 report.md" });
+  try {
+    const { app, page } = running;
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(680, 520));
+    await newSession(page);
+    await expect(picker(page)).toHaveText("请求批准");
+    await picker(page).click();
+    await expect(options(page).getByRole("button", { name: "请求批准", exact: true })).toHaveAttribute("aria-pressed", "true");
+    const menu = await options(page).boundingBox();
+    const trigger = await picker(page).boundingBox();
+    assert.ok(menu.y >= 0 && menu.y + menu.height <= trigger.y && menu.x + menu.width <= 680);
+    await page.keyboard.press("Escape");
+    await expect(options(page)).toBeHidden();
+    await chooseMode(page, "自动审批");
+    await submit(page, "生成一份报告");
+    await settled(page);
+    assert.match(await readFile(join(project, "report.md"), "utf8"), /TeamHub 工作记录/);
+    await submit(page, "修复 math.mjs");
+    await expect(approval(page)).toBeVisible();
+    assert.equal((await current(page)).pending?.name, "Bash");
+    await chooseMode(page, "完全访问");
+    await expect(approval(page)).toBeVisible();
+    await page.getByRole("button", { name: "中断", exact: true }).click();
+    await settled(page, "interrupted");
+
+    await submit(page, "修复 math.mjs");
+    await settled(page);
+    const events = (await current(page)).events;
+    const turn = events.findLast(event => event.type === "user").turn;
+    assert.equal(events.filter(event => event.turn === turn && event.type === "execute" && event.data.call.name === "Bash").length, 2);
+    assert.match(await readFile(join(project, "math.mjs"), "utf8"), /reduce\(\(sum, item\) => sum \+ item, 0\)/);
+
+    const openNavigation = async () => {
+      const toggle = page.getByRole("button", { name: "会话导航", exact: true });
+      if (await toggle.isVisible()) await toggle.click();
+    };
+    await openNavigation();
+    await page.getByRole("button", { name: "在 permissions project 中新建对话" }).click();
+    await expect(picker(page)).toHaveText("请求批准");
+    await submit(page, "修订 report.md");
+    await expect(approval(page)).toBeVisible();
+    assert.equal((await current(page)).pending?.name, "apply_patch");
+    await approval(page).click();
+    await settled(page);
+    await openNavigation();
+    await report(page).click();
+    await expect(picker(page)).toHaveText("完全访问");
+    await openNavigation();
+    await revision(page).click();
+    await expect(picker(page)).toHaveText("请求批准");
+
+    await running.app.close();
+    running = await launch(data, [], { restore: true });
+    await expect(picker(running.page)).toHaveText("请求批准");
+    await report(running.page).click();
+    await expect(picker(running.page)).toHaveText("完全访问");
+  } finally { await running.app.close(); }
+});
+
 test("workspace drafts enter history only after sending, and the toolbar plus opens the member picker", { timeout: 50_000 }, async () => {
   const data = await appData();
   const first = join(data, "project one");

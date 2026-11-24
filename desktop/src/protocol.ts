@@ -3,6 +3,8 @@ import type { ModelConfig } from "../../toy-harness/src/model.js";
 import type { Config } from "../../toy-harness/src/session.js";
 
 export type Peer = string;
+export const approvalModes = ["request", "auto", "full"] as const;
+export type ApprovalMode = typeof approvalModes[number];
 export type Profile = {
   mode: "offline" | "model";
   config: Omit<Config, "hooks" | "teamhub">;
@@ -12,7 +14,7 @@ export type Conversation = {
   id: string; created: number; members: Member[];
 };
 export type Member = {
-  id: string; cwd: string; peer?: Peer; directory?: string;
+  id: string; cwd: string; peer?: Peer; directory?: string; approvalMode?: ApprovalMode;
 };
 export type ApprovalKey = { turn: string; request: number; callId: string };
 export type Pending = ApprovalKey & { name: string; args: Record<string, unknown> };
@@ -28,9 +30,10 @@ export type Snapshot = {
 };
 export type LocalMember = { peer: Peer; cwd?: string; open: boolean };
 export type Command =
-  | { type: "submit"; text: string } | { type: "steer"; text: string }
+  | { type: "submit"; text: string; approvalMode?: ApprovalMode } | { type: "steer"; text: string }
   | { type: "approve"; key: ApprovalKey; allow: boolean }
-  | { type: "interrupt" | "resume" | "close" | "peers" }
+  | { type: "resume"; approvalMode?: ApprovalMode }
+  | { type: "interrupt" } | { type: "close" } | { type: "peers" }
   | { type: "rollback"; seq: number };
 export type WorkerRequest =
   | { type: "init"; member: Member; directory: string; exists: boolean; profile: Profile; teamUrl?: string; hookPath: string; key?: string }
@@ -49,9 +52,10 @@ export type Api = {
   state(): Promise<Snapshot>;
   subscribe(callback: (state: Snapshot) => void): () => void;
   folder(): Promise<string | undefined>;
-  create(path: string, text: string): Promise<{ id: string } | { issue: Issue }>;
+  create(path: string, text: string, approvalMode?: ApprovalMode): Promise<{ id: string } | { issue: Issue }>;
   importSession(): Promise<string | undefined>;
   select(id?: string): Promise<void>;
+  setApprovalMode(id: string, mode: ApprovalMode): Promise<void>;
   command(id: string, command: Command): Promise<unknown>;
   retry(id: string): Promise<void>;
   peers(id: string): Promise<unknown>;

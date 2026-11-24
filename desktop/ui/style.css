@@ -158,8 +158,33 @@ summary { cursor: pointer; }
 .composer:focus-within { border-color: var(--accent); }
 .composer textarea { resize: vertical; min-height: 52px; max-height: 23vh; width: 100%; display: block; padding: 4px 5px; background: transparent; border: 0; color: var(--text); }
 .composer textarea:focus-visible { outline-offset: -1px; }
-.composer-controls { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-left: 5px; }
+.composer-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
 .composer-controls .actions { justify-content: flex-end; }
+.composer-context { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.approval-picker { position: relative; }
+.approval-picker summary {
+  display: flex; align-items: center; gap: 6px; min-height: 34px; padding: 4px 9px;
+  border-radius: 7px; color: var(--muted); cursor: pointer; list-style: none; white-space: nowrap;
+}
+.approval-picker summary::-webkit-details-marker { display: none; }
+.approval-picker summary[aria-disabled="true"] { opacity: .52; cursor: default; }
+.approval-picker summary:hover:not([aria-disabled="true"]), .approval-picker[open] summary { background: var(--hover); }
+.approval-picker [data-mode="full"] { color: var(--warning); }
+.approval-options {
+  position: absolute; z-index: 2; inset: auto auto calc(100% + 6px) 0;
+  width: min(350px, calc(100vw - 52px)); max-height: 50dvh; overflow: auto;
+  padding: 5px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--panel); box-shadow: 0 6px 20px var(--shadow);
+}
+.approval-options-heading { padding: 4px 8px; color: var(--muted); font-size: 12px; }
+.approval-options button {
+  width: 100%; align-items: flex-start; justify-content: flex-start; padding: 7px 8px;
+  border-color: transparent; background: transparent; text-align: left;
+}
+.approval-options button[aria-pressed="true"] { background: var(--selected); }
+.approval-options button svg { margin-top: 2px; }
+.approval-options button span { flex: 1; min-width: 0; }
+.approval-options small { display: block; color: var(--muted); }
 .peer-panel { width: 260px; flex: none; overflow: auto; background: var(--sidebar); padding: 12px; border-left: 1px solid var(--line); }
 .peer-panel header, dialog header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .peer-panel h2, dialog h2 { font-size: 17px; margin: 0; }

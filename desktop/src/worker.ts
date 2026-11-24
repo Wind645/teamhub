@@ -4,7 +4,7 @@ import { HttpModel } from "../../toy-harness/src/model.js";
 import { openSession, type Config } from "../../toy-harness/src/session.js";
 import { ApprovalGate } from "./approval.js";
 import { offlineModel } from "./offline.js";
-import type { Command, Issue, WorkerMessage, WorkerRequest } from "./protocol.js";
+import type { ApprovalMode, Command, Issue, WorkerMessage, WorkerRequest } from "./protocol.js";
 
 const send = (message: WorkerMessage) => { if (process.connected) process.send?.(message); };
 const gate = new ApprovalGate(pending => send({ type: "pending", pending }));
@@ -13,6 +13,7 @@ let initialization: Promise<void> | undefined;
 let work: Promise<unknown> | undefined;
 let closing = false;
 let credential: string | undefined;
+let approvalMode: ApprovalMode = "request";
 
 const issue = (error: unknown, kind: Issue["kind"] = "session"): Issue => {
   const detail = String(error);
@@ -31,7 +32,10 @@ async function initialize(message: Extract<WorkerRequest, { type: "init" }>) {
     id: exists ? member.id : undefined, createId: member.id, config,
     model: journal => profile.mode === "offline" ? offlineModel(journal, member.peer)
       : new HttpModel(profile.config.model!, () => credential),
-    approve: (tool, args, signal, identity) => gate.wait({ ...identity, name: tool.name, args }, signal),
+    async approve(tool, args, signal, identity) {
+      if (approvalMode === "full" || approvalMode === "auto" && tool.name === "apply_patch") return true;
+      return gate.wait({ ...identity, name: tool.name, args }, signal);
+    },
     emit: event => send({ type: "event", event }), log: text => console.error(text),
     requireHub: Boolean(teamUrl),
   });
@@ -65,6 +69,7 @@ async function dispatch(command: Command) {
     return replies.map(reply => reply.structuredContent);
   }
   if (work || runtime.busy) throw new Error("A turn is already running");
+  approvalMode = command.approvalMode ?? "request";
   work = (command.type === "submit" ? runtime.submit(command.text) : runtime.resume())
     .catch(error => send({ type: "fatal", issue: issue(error) }))
     .finally(() => { work = undefined; });
