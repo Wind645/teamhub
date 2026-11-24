@@ -63,7 +63,10 @@ pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto;
 .brand-mark { flex: none; object-fit: cover; border: 1px solid var(--line); border-radius: 8px; }
 .new-button { justify-content: flex-start; width: 100%; font-weight: 600; }
 .workspace-list { overflow: auto; flex: 1; padding: 16px 0; min-height: 0; }
-.workspace h2 { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--muted); margin: 0; padding: 10px 8px 5px; font-weight: 600; }
+.workspace-heading { display: flex; align-items: center; justify-content: space-between; gap: 4px; padding: 2px 4px 1px 8px; color: var(--muted); }
+.workspace h2 { display: flex; gap: 8px; align-items: center; min-width: 0; font-size: 12px; margin: 0; font-weight: 600; }
+.workspace h2 svg { flex: none; }
+.workspace-heading .icon-button { flex: none; width: 24px; height: 24px; min-height: 24px; }
 .workspace h2 span, .session-button > span:first-child, .conversation-title { text-overflow: ellipsis; overflow: hidden; white-space: nowrap; min-width: 0; }
 .conversation { margin: 0 0 4px; }
 .conversation-title { color: var(--muted); font-size: 12px; margin: 9px 8px 3px; }
@@ -104,6 +107,13 @@ h1 { margin: 12px 0 19px; font-size: 28px; line-height: 1.28; overflow-wrap: any
 .timeline, .composer { width: min(100%, 820px); margin: 0 auto; }
 .timeline { display: flex; flex-direction: column; gap: 12px; padding: 24px 26px 28px; min-height: 100%; }
 .timeline > .path-note { margin: 0 0 3px; }
+.timeline-activity { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px; }
+.timeline-activity:empty { position: absolute; }
+.timeline-activity-spinner { animation: timeline-activity-spin 1.2s linear infinite; }
+@keyframes timeline-activity-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .timeline-activity-spinner { animation: none; }
+}
 .empty-session { margin: auto; text-align: center; color: var(--muted); padding: 30px 0; }
 .empty-session h1 { color: var(--text); margin: 8px 0 4px; font-size: 23px; }
 .empty-session p { margin: 0 0 14px; }
@@ -111,6 +121,11 @@ h1 { margin: 12px 0 19px; font-size: 28px; line-height: 1.28; overflow-wrap: any
 .user-message p { margin: 0; white-space: pre-wrap; }
 .user-message strong { font-size: 12px; }
 .assistant-message { margin: 2px 0 6px; min-width: 0; overflow-wrap: anywhere; }
+.reasoning { min-width: 0; color: var(--muted); overflow-wrap: anywhere; }
+.reasoning > button { padding: 3px 5px; gap: 5px; color: inherit; border-color: transparent; background: transparent; }
+.reasoning > button:hover { background: var(--hover); }
+.reasoning > button[aria-expanded="false"] svg { transform: rotate(-90deg); }
+.reasoning-body { margin-left: 12px; padding: 4px 10px; border-left: 1px solid var(--line); }
 .byline { font-size: 12px; font-weight: 600; margin-bottom: 4px; }
 .markdown > :first-child { margin-top: 0; }
 .markdown > :last-child { margin-bottom: 0; }

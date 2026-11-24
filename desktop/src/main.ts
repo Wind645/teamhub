@@ -26,6 +26,7 @@ const workers = new Map<string, Worker>();
 const windows = new Map<Peer, MemberWindow>();
 const focusOrder = new Set<Peer>();
 const startingTurns = new Set<Peer>();
+const startingConversations = new Map<Peer, Member>();
 const credentials = new Map<Peer, Credential>();
 let index: MemberIndex = { version: 2, externalHub: "", members: [] };
 let picker: BrowserWindow | undefined;
@@ -315,7 +316,7 @@ class Worker {
               const notice = String(state.events.findLast(item => item.turn === message.event.turn && item.type === "notice")?.data ?? "");
               if (/credential environment variable/.test(notice)) state.issue = error("credential", notice);
               else if (/TeamHub|MCP|session expired/i.test(notice)) state.issue = error("hub", notice);
-              else if (/fetch failed|Model HTTP|Missing (Chat Completions|Responses)/i.test(notice)) state.issue = error("model", notice);
+              else if (/fetch failed|Model HTTP|Model stream:|(?:Chat Completions|Responses) stream|Missing (Chat Completions|Responses)/i.test(notice)) state.issue = error("model", notice);
             }
           } else if (message.type === "pending") {
             state.pending = message.pending;
@@ -401,7 +402,10 @@ function hasWork(record: MemberRecord) {
     conversationsOf(record).some(({ id }) => sessions[id].phase === "starting" || isRunning(sessions[id]));
 }
 async function stopWorkers(record: MemberRecord) {
-  await Promise.all(conversationsOf(record).map(async ({ id }) => {
+  const members = conversationsOf(record);
+  const starting = startingConversations.get(record.peer);
+  if (starting) members.push(starting);
+  await Promise.all(members.map(async ({ id }) => {
     const worker = workers.get(id);
     if (!worker) return;
     workers.delete(id);
@@ -462,6 +466,17 @@ function select({ window, record }: MemberWindow, id?: string) {
   warm(record);
   publish(record.peer);
 }
+function checkNewTurn(record: MemberRecord, id?: string) {
+  if (startingTurns.has(record.peer) || conversationsOf(record).some(other => other.id !== id && isRunning(sessions[other.id]))) {
+    throw error("session", "此成员已有回合在运行。请先完成或中断该回合。");
+  }
+  if (record.profile.mode === "model" && !currentKey(record.peer, record.profile)) {
+    throw error("credential", `请输入本次使用的密钥，或在启动前设置 ${record.profile.config.model?.keyEnv}。`);
+  }
+}
+function validatePrompt(text: string) {
+  if (typeof text !== "string" || !text.trim() || text.length > 100_000) throw new Error("任务内容无效");
+}
 function add(owner: MemberWindow, group: Conversation) {
   owner.record.conversations.unshift(group);
   for (const member of group.members) sessions[member.id] = restore(member);
@@ -482,11 +497,42 @@ function memberApi(owner: MemberWindow): Omit<Api, "subscribe" | "members" | "op
       const result = await dialog.showOpenDialog(window, { properties: ["openDirectory"], title: "选择项目文件夹", defaultPath: record.cwd });
       return result.canceled ? undefined : result.filePaths[0];
     },
-    async create(path) {
+    async create(path, text) {
+      validatePrompt(text);
       if (typeof path !== "string" || !isAbsolute(path)) throw new Error("请选择工作目录");
       const cwd = realpathSync(path);
       if (!statSync(cwd).isDirectory()) throw new Error("工作目录不可用");
-      return add(owner, { id: randomUUID(), created: Date.now(), members: [{ id: randomUUID(), cwd, peer: record.peer }] });
+      const member = { id: randomUUID(), cwd, peer: record.peer };
+      const { id } = member;
+      const state = restore(member);
+      try { checkNewTurn(record); }
+      catch (cause) { return { issue: cause as Issue }; }
+      startingTurns.add(record.peer);
+      startingConversations.set(record.peer, member);
+      sessions[id] = state;
+      try {
+        const worker = start(record, member);
+        try { await worker.send({ type: "submit", text }); }
+        catch (cause) { if (!state.events.some(event => event.type === "user")) throw cause; }
+        if (!state.events.some(event => event.type === "user")) throw state.issue ?? error("session", "首条消息未写入，请重试。");
+        record.conversations.unshift({ id: randomUUID(), created: Date.now(), members: [member] });
+        startingConversations.delete(record.peer);
+        if (window.isDestroyed() || owner.closing || quitting) persist();
+        else select(owner, id);
+        return { id };
+      } catch (cause) {
+        return { issue: cause && typeof cause === "object" && "kind" in cause ? cause as Issue : error("session", String(cause)) };
+      } finally {
+        if (startingConversations.delete(record.peer)) {
+          const worker = workers.get(id);
+          workers.delete(id);
+          try {
+            await worker?.close();
+            if (!state.events.some(event => event.type === "user")) rmSync(journalFile(member), { force: true });
+          } finally { delete sessions[id]; }
+        }
+        startingTurns.delete(record.peer);
+      }
     },
     async importSession() {
       const result = await dialog.showOpenDialog(window!, { properties: ["openFile"], title: "导入会话日志", filters: [{ name: "会话日志", extensions: ["jsonl"] }] });
@@ -514,17 +560,15 @@ function memberApi(owner: MemberWindow): Omit<Api, "subscribe" | "members" | "op
       if (!member || !command || !["submit", "steer", "approve", "interrupt", "resume", "rollback"].includes(command.type)) {
         throw new Error("无效的会话操作");
       }
-      if ((command.type === "submit" || command.type === "steer") && (typeof command.text !== "string" || !command.text.trim() || command.text.length > 100_000)) throw new Error("任务内容无效");
+      if (command.type === "submit" || command.type === "steer") validatePrompt(command.text);
       if (command.type === "approve" && !workers.has(id)) return false;
       const state = sessions[id];
       if (command.type === "submit" || command.type === "resume") {
-        if (startingTurns.has(record.peer) || conversationsOf(record).some(other => other.id !== id && isRunning(sessions[other.id]))) {
-          throw new Error("此成员已有回合在运行。请先完成或中断该回合。");
-        }
-        if (record.profile.mode === "model" && !currentKey(record.peer, record.profile)) {
-          state.issue = error("credential", `请输入本次使用的密钥，或在启动前设置 ${record.profile.config.model?.keyEnv}。`);
-          publish(record.peer);
-          throw state.issue;
+        try { checkNewTurn(record, id); }
+        catch (cause) {
+          const issue = cause as Issue;
+          if (issue.kind === "credential") { state.issue = issue; publish(record.peer); }
+          throw issue;
         }
         state.issue = undefined;
         startingTurns.add(record.peer);

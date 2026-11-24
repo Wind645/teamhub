@@ -150,15 +150,30 @@ export class Runtime {
         active.step = decision;
         const context = buildContext(this.journal.active(), turn, this.options.instructions, this.options.context);
         this.add("model", { step: step + 1, compressed: context.compressed }, turn);
-        const reply: Reply = await this.options.model.next(context.messages, this.options.registry.specs(), signal);
+        let reply: Reply;
+        let receivedOutput = false;
+        let streamedText = false;
+        try {
+          reply = await this.options.model.next(context.messages, this.options.registry.specs(), signal, update => {
+            if (signal.aborted) return;
+            if (update.type === "delta") {
+              receivedOutput = true;
+              if (update.kind === "text") streamedText = true;
+            }
+            if (receivedOutput) this.add("assistant_output", update, turn);
+          });
+        } finally {
+          if (receivedOutput) this.add("assistant_output", { type: "end" }, turn);
+        }
         signal.throwIfAborted();
         if ((reply.calls?.length ?? 0) > 50 ||
             new Set(reply.calls?.map(call => call.id)).size !== (reply.calls?.length ?? 0) ||
             reply.calls?.some(call => typeof call.id !== "string" || !call.id || typeof call.name !== "string")) {
           throw new Error("Model returned an invalid tool-call batch");
         }
+        const recorded = streamedText ? { ...reply, streamedText: true } : reply;
         if (reply.calls?.length) {
-          const message = this.add("assistant", reply, turn);
+          const message = this.add("assistant", recorded, turn);
           for (const [index, call] of reply.calls.entries()) {
             signal.throwIfAborted();
             await this.dispatch(turn, message.seq * 1000 + index, call, signal, decision.signal);
@@ -172,7 +187,7 @@ export class Runtime {
           await register("TurnResume");
           continue;
         }
-        this.add("assistant", reply, turn);
+        this.add("assistant", recorded, turn);
         this.add("final", reply.text, turn);
         this.add("status", "completed", turn);
         return reply.text;

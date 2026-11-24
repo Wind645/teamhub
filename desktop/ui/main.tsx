@@ -1,10 +1,11 @@
 import React, { useEffect, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import { ArrowUp, Check, ChevronDown, CircleAlert, FileText, Folder, FolderOpen, History, Menu, Plus, RotateCcw, Settings, Square, Terminal, Users, X } from "lucide-react";
+import { ArrowUp, Check, ChevronDown, CircleAlert, Clock, FileText, Folder, FolderOpen, History, LoaderCircle, Menu, Plus, RotateCcw, Settings, Square, Terminal, Users, X } from "lucide-react";
 import Markdown from "react-markdown";
 import gfm from "remark-gfm";
 import type { Api, Command, Issue, LocalMember, Member, Pending, Profile, SessionState, Snapshot } from "../src/protocol";
 import type { Event } from "../../toy-harness/src/journal";
+import { timelineRows } from "./timeline";
 import "./style.css";
 
 declare global { interface Window { teamhub: Api } }
@@ -34,8 +35,11 @@ function status(state?: SessionState, events = activeEvents(state?.events ?? [])
   const key = last === "running" && state?.phase !== "ready" ? "paused" : last;
   return { key, text: phases[key] ?? key };
 }
-function IconButton({ label, click, children, pressed }: { label: string; click: () => void; children: ReactNode; pressed?: boolean }) {
-  return <button type="button" className="icon-button" title={label} aria-label={label} aria-pressed={pressed} onClick={click}>{children}</button>;
+function IconButton({ label, click, children, pressed, disabled }: {
+  label: string; click: () => void; children: ReactNode; pressed?: boolean; disabled?: boolean;
+}) {
+  return <button type="button" className="icon-button" title={label} aria-label={label} aria-pressed={pressed}
+    disabled={disabled} onClick={click}>{children}</button>;
 }
 function BrandMark() {
   return <img className="brand-mark" src="./teamhub.png" alt="" width={32} height={32} />;
@@ -49,6 +53,16 @@ function RichText({ text }: { text: string }) {
     a: ({ children }) => <span>{children}</span>,
     img: ({ alt }) => <span>{alt}</span>,
   }}>{text}</Markdown></div>;
+}
+function Reasoning({ id, text, active }: { id: string; text: string; active: boolean }) {
+  const [choice, setChoice] = useState<boolean>();
+  const expanded = choice ?? active;
+  return <div className="reasoning">
+    <button type="button" aria-expanded={expanded} aria-controls={id} onClick={() => setChoice(!expanded)}>
+      <ChevronDown size={15} aria-hidden="true" />{active ? "思考中" : "思考过程"}
+    </button>
+    <div id={id} hidden={!expanded} className="reasoning-body"><RichText text={text} /></div>
+  </div>;
 }
 function Disclosure({ label, text }: { label: string; text: string }) {
   return <details className="disclosure"><summary>{label}</summary><pre>{text}</pre></details>;
@@ -115,22 +129,15 @@ function ToolRow({ event, events, pending, member, act, report }: {
   </div>;
 }
 
-function NewConversation({ run, profile, report }: {
-  run: (path: string) => Promise<string>; profile: Profile; report: (error: unknown) => void;
+function NewConversation({ open, profile, report }: {
+  open: (path: string) => void; profile: Profile; report: (error: unknown) => void;
 }) {
   const [path, setPath] = useState<string>();
-  const [starting, setStarting] = useState(false);
   const browse = async () => {
     try {
       const selected = await api.folder();
       if (selected) setPath(selected);
     } catch (error) { report(error); }
-  };
-  const create = async () => {
-    if (!path) return;
-    setStarting(true);
-    try { await run(path); }
-    catch (error) { report(error); setStarting(false); }
   };
   return <div className="new-scroll"><section className="new-conversation">
     <div className="workspace-icon"><FolderOpen size={25} /></div>
@@ -142,7 +149,7 @@ function NewConversation({ run, profile, report }: {
       </div>
     </div>
     <footer className="new-actions"><span className="muted">{profile.mode === "offline" ? "离线体验" : profile.config.model?.name}</span>
-      <button className="primary" disabled={starting || !path} onClick={() => void create()}>进入对话</button></footer>
+      <button className="primary" disabled={!path} onClick={() => { if (path) open(path); }}>进入对话</button></footer>
   </section></div>;
 }
 
@@ -246,6 +253,9 @@ function App() {
   const [peers, setPeers] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [sending, setSending] = useState<string>();
+  const [newChat, setNewChat] = useState<{ path?: string }>();
+  const [newIssue, setNewIssue] = useState<Issue>();
+  const [creating, setCreating] = useState(false);
   const scroll = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const positions = useRef<Record<string, { top: number; pinned: boolean }>>({});
@@ -257,30 +267,76 @@ function App() {
     void api.state().then(setSnapshot).catch(error => setErrors({ "": String(error) }));
     return remove;
   }, []);
-  const id = snapshot?.active;
+  const id = newChat ? undefined : snapshot?.active;
   const groups = snapshot?.conversations ?? [];
   const group = groups.find(group => group.members.some(member => member.id === id));
   const member = group?.members.find(member => member.id === id);
   const state = id ? snapshot?.sessions[id] : undefined;
   const events = activeEvents(state?.events ?? []);
   const phase = status(state, events);
-  const running = phase.key === "running" && state?.phase === "ready" || phase.key === "pending";
+  const working = phase.key === "running" && state?.phase === "ready";
+  const waitingForApproval = phase.key === "pending";
+  const running = working || waitingForApproval;
+  const rows = timelineRows(events, working && !state?.issue);
+  const lastRow = rows.at(-1);
+  let activityText: string | undefined;
+  if (!state?.issue) {
+    if (waitingForApproval || state?.phase === "starting") activityText = phase.text;
+    else if (working) {
+      activityText = "正在运行";
+      if (lastRow?.kind === "reasoning" && lastRow.active) activityText = "正在思考";
+      if (lastRow?.kind === "text" && lastRow.active) activityText = "正在回复";
+    }
+  }
   const resumable = ["paused", "failed", "interrupted"].includes(phase.key);
-  const draft = id ? drafts[id] ?? "" : "";
+  const draftKey = id ?? "";
+  const draft = drafts[draftKey] ?? "";
+  const cwd = member?.cwd ?? newChat?.path;
   const report = (error: unknown) => setErrors(previous => ({ ...previous, [id ?? ""]: error instanceof Error ? error.message : String(error) }));
   const send = (command: Command) => id ? api.command(id, command) : Promise.resolve(undefined);
   const focusPending = () => {
     if (!id || !state?.pending) return;
     requestAnimationFrame(() => document.getElementById("approval-" + state.pending?.request)?.scrollIntoView({ block: "nearest" }));
   };
-  const choose = (next?: string) => {
+  const choose = (next: string) => {
+    if (creating) return;
     setNav(false);
     setModal(undefined);
     if (next === id) focusPending();
-    void api.select(next).catch(report);
+    void api.select(next).then(closeDraft).catch(report);
+  };
+  const closeDraft = () => {
+    setNewChat(undefined);
+    setNewIssue(undefined);
+    setDrafts(previous => ({ ...previous, "": "" }));
+    setErrors(previous => ({ ...previous, "": "" }));
+  };
+  const openDraft = (path?: string) => {
+    if (creating) return;
+    closeDraft();
+    setNewChat({ path });
+    setNav(false);
+    setModal(undefined);
   };
   const submit = async () => {
-    if (!id || !draft.trim() || sending === id || state?.phase !== "ready") return;
+    if (!draft.trim()) return;
+    if (!id) {
+      if (!cwd || creating) return;
+      setCreating(true);
+      setNewIssue(undefined);
+      setErrors(previous => ({ ...previous, "": "" }));
+      try {
+        const result = await api.create(cwd, draft.trim());
+        if ("issue" in result) setNewIssue(result.issue);
+        else {
+          setSnapshot(await api.state());
+          closeDraft();
+        }
+      } catch (error) { report(error); }
+      finally { setCreating(false); }
+      return;
+    }
+    if (sending === id || state?.phase !== "ready") return;
     setErrors(previous => ({ ...previous, [id]: "" }));
     setSending(id);
     try {
@@ -301,13 +357,14 @@ function App() {
     } else if (positions.current[id]?.pinned !== false) {
       element.scrollTop = element.scrollHeight;
     }
-  }, [id, state?.events.length, state?.pending?.request]);
+  }, [id, state?.events.length, state?.pending?.request, activityText]);
   useEffect(() => {
-    if (id && !draft) composing.current = false;
-  }, [id, draft]);
+    composing.current = false;
+    if (newChat?.path) composer.current?.focus();
+  }, [id, newChat]);
 
   if (!snapshot) return <main className="loading">{errors[""] || "正在打开 TeamHub…"}</main>;
-  const currentIssue = state?.issue ?? (errors[id ?? ""] ? { kind: "session" as const, detail: errors[id ?? ""] } : undefined);
+  const currentIssue = state?.issue ?? newIssue ?? (errors[draftKey] ? { kind: "session" as const, detail: errors[draftKey] } : undefined);
   const mode = snapshot.profile.mode === "offline" ? "离线体验" : snapshot.profile.config.model?.name;
   const workspaceGroups = [...new Set(groups.map(group => group.members[0].cwd))];
 
@@ -315,15 +372,20 @@ function App() {
     {nav && <button className="nav-backdrop" aria-label="关闭导航" onClick={() => setNav(false)} />}
     <aside className={"sidebar" + (nav ? " expanded" : "")} aria-label="会话导航">
       <div className="brand"><BrandMark /><strong>TeamHub</strong></div>
-      <button className="new-button" onClick={() => choose()}><Plus size={18} />新建对话</button>
+      <button className="new-button" disabled={creating} onClick={() => openDraft()}><Plus size={18} />新建对话</button>
       <div className="workspace-list">
         {workspaceGroups.map(path => <section className="workspace" key={path}>
-          <h2 title={path}><Folder size={14} /><span>{base(path)}</span></h2>
+          <div className="workspace-heading">
+            <h2 title={path}><Folder size={14} /><span>{base(path)}</span></h2>
+            <IconButton label={`在 ${base(path)} 中新建对话`} click={() => openDraft(path)} disabled={creating}>
+              <Plus size={14} />
+            </IconButton>
+          </div>
           {groups.filter(group => group.members[0].cwd === path).map(item => {
             const first = activeEvents(snapshot.sessions[item.members[0].id]?.events ?? []).find(event => event.type === "user");
             const label = String(first?.data ?? "新对话");
             return <div className="conversation" key={item.id}>
-              {item.members.map(current => <button key={current.id} aria-current={id === current.id ? "page" : undefined}
+              {item.members.map(current => <button key={current.id} disabled={creating} aria-current={id === current.id ? "page" : undefined}
                 className="session-button" onClick={() => choose(current.id)}>
                 <span title={label}>{label}</span>
                 <Status state={snapshot.sessions[current.id]} />
@@ -333,7 +395,9 @@ function App() {
         </section>)}
       </div>
       <div className="sidebar-bottom">
-        <button onClick={() => void api.importSession().then(value => { if (value) setNav(false); }).catch(report)}><History size={17} />导入会话</button>
+        <button disabled={creating} onClick={() => void api.importSession().then(value => {
+          if (value) { closeDraft(); setNav(false); }
+        }).catch(report)}><History size={17} />导入会话</button>
         <button onClick={() => { setModal("settings"); setNav(false); }}><Settings size={17} />设置</button>
       </div>
     </aside>
@@ -342,35 +406,43 @@ function App() {
         <div className="mobile-nav"><IconButton label="会话导航" click={() => setNav(value => !value)}><Menu size={20} /></IconButton></div>
         <div className="topbar-title">
           <strong title={snapshot.peer}>{snapshot.peer}</strong>
-          {member && <code title={member.cwd}>{member.cwd}</code>}
+          {cwd && <code title={cwd}>{cwd}</code>}
         </div>
         <span className="model-label" title={mode}>{mode}</span>
         {member?.peer && <IconButton label="协作状态" click={() => setPeers(value => !value)} pressed={peers}><Users size={18} /></IconButton>}
         {member && <IconButton label="检查点" click={() => setModal("checkpoints")}><History size={19} /></IconButton>}
-        <IconButton label="新建成员窗口" click={() => void api.memberPicker().catch(report)}><Users size={18} /></IconButton>
+        <IconButton label="新建成员窗口" click={() => void api.memberPicker().catch(report)}><Plus size={18} /></IconButton>
         <IconButton label="模型设置" click={() => setModal("settings")}><Settings size={18} /></IconButton>
       </header>
-      {!group || !member || !id ? <>
+      {!cwd ? <>
         {currentIssue && <div className="issue-wrap"><IssueBox issue={currentIssue} settings={() => setModal("settings")} /></div>}
-        <NewConversation run={api.create} profile={snapshot.profile} report={report} />
+        <NewConversation key={newChat ? "new" : "initial"} open={openDraft} profile={snapshot.profile} report={report} />
       </> : <div className="session-layout">
         <div className="session-main">
           <div className="timeline-scroll" ref={scroll} onScroll={event => {
+            if (!id) return;
             const box = event.currentTarget;
-            positions.current[id] = { top: box.scrollTop, pinned: box.scrollHeight - box.clientHeight - box.scrollTop < 36 };
+            const prior = positions.current[id];
+            const nearBottom = box.scrollHeight - box.clientHeight - box.scrollTop < 36;
+            positions.current[id] = {
+              top: box.scrollTop,
+              pinned: nearBottom && (prior?.pinned !== false || box.scrollTop > prior.top),
+            };
           }}>
             <div className="timeline" aria-label="会话时间线">
-              {events.length <= 1 && <div className="empty-session"><FolderOpen size={26} /><h1>{base(member.cwd)}</h1><p>输入任务以开始对话</p>
-                {snapshot.profile.mode === "offline" && <button onClick={() => { setDrafts(previous => ({ ...previous, [id]: "生成一份报告" })); composer.current?.focus(); }}>试用：生成一份报告</button>}
+              {events.length <= 1 && <div className="empty-session"><FolderOpen size={26} /><h1>{base(cwd)}</h1><p>输入任务以开始对话</p>
+                {snapshot.profile.mode === "offline" && <button disabled={creating} onClick={() => { setDrafts(previous => ({ ...previous, [draftKey]: "生成一份报告" })); composer.current?.focus(); }}>试用：生成一份报告</button>}
               </div>}
-              {events.map(event => {
+              {member && rows.map(row => {
+                if (row.kind !== "event") {
+                  if (row.kind === "reasoning") return <Reasoning key={id + ":" + row.seq} id={"reasoning-" + row.seq}
+                    text={row.text} active={row.active} />;
+                  return <article key={row.seq} className="assistant-message">
+                    <div className="byline">{name(member)}</div><RichText text={row.text} /></article>;
+                }
+                const { event } = row;
                 if (event.type === "user" || event.type === "steer") return <article className="user-message" key={event.seq}>
                   {event.type === "steer" && <strong>追加指令 · 已排队</strong>}<p>{String(event.data)}</p></article>;
-                if (event.type === "final") return <article key={event.seq} className="assistant-message"><div className="byline">{name(member)}</div><RichText text={String(event.data)} /></article>;
-                if (event.type === "assistant") {
-                  const reply = event.data as { text: string; calls?: unknown[] };
-                  return reply.text && reply.calls?.length ? <article key={event.seq} className="assistant-message"><div className="byline">{name(member)}</div><RichText text={reply.text} /></article> : null;
-                }
                 if (event.type === "request") return <div key={event.seq} id={"approval-" + (event.data as { request: number }).request}>
                   <ToolRow event={event} events={events} pending={state?.pending} member={member} report={report}
                     act={(key, allow) => send({ type: "approve", key, allow })} /></div>;
@@ -380,13 +452,20 @@ function App() {
                 return null;
               })}
               {currentIssue && <IssueBox issue={currentIssue} settings={() => setModal("settings")}
-                retry={currentIssue.kind === "hub" || currentIssue.kind === "session" ? () => void api.retry(id).then(() => setErrors(previous => ({ ...previous, [id]: "" }))).catch(report) : undefined} />}
+                retry={id && (currentIssue.kind === "hub" || currentIssue.kind === "session") ? () => void api.retry(id).then(() => setErrors(previous => ({ ...previous, [id]: "" }))).catch(report) : undefined} />}
+              {member && <div className="timeline-activity" role="status">
+                {activityText && <>
+                  {waitingForApproval ? <Clock size={15} aria-hidden="true" /> :
+                    <LoaderCircle size={15} className="timeline-activity-spinner" aria-hidden="true" />}
+                  <span>{activityText}</span>
+                </>}
+              </div>}
             </div>
           </div>
           <div className="composer-area">
             <div className="composer">
               <textarea ref={composer} aria-label="任务" placeholder={running ? "输入要追加的指令" : "输入任务…"} value={draft}
-                onChange={event => setDrafts(previous => ({ ...previous, [id]: event.target.value }))}
+                readOnly={creating} onChange={event => setDrafts(previous => ({ ...previous, [draftKey]: event.target.value }))}
                 onCompositionStart={() => { composing.current = true; }}
                 onCompositionEnd={() => { composing.current = false; }}
                 onKeyDown={event => {
@@ -395,18 +474,18 @@ function App() {
                   void submit();
                 }} />
               <div className="composer-controls">
-                <Status state={state} />
+                <Status state={creating ? { phase: "starting", events: [] } : state} />
                 <div className="actions">
                   {resumable && <button onClick={() => void send({ type: "resume" }).catch(report)}><RotateCcw size={14} />继续此回合</button>}
                   {running && <button onClick={() => void send({ type: "interrupt" }).catch(report)}><Square size={13} />中断</button>}
-                  <button className="primary" disabled={!draft.trim() || sending === id || state?.phase !== "ready"} onClick={() => void submit()}>
+                  <button className="primary" disabled={!draft.trim() || creating || Boolean(id && (sending === id || state?.phase !== "ready"))} onClick={() => void submit()}>
                     <ArrowUp size={16} />{running ? "追加指令" : "发送"}</button>
                 </div>
               </div>
             </div>
           </div>
         </div>
-        {peers && member.peer && <PeerPanel member={member} close={() => setPeers(false)} />}
+        {peers && member?.peer && <PeerPanel member={member} close={() => setPeers(false)} />}
       </div>}
     </main>
     {modal === "settings" && <ModelSettings snapshot={snapshot} close={() => setModal(undefined)} report={error => {

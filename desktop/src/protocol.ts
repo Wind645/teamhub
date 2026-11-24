@@ -49,7 +49,7 @@ export type Api = {
   state(): Promise<Snapshot>;
   subscribe(callback: (state: Snapshot) => void): () => void;
   folder(): Promise<string | undefined>;
-  create(path: string): Promise<string>;
+  create(path: string, text: string): Promise<{ id: string } | { issue: Issue }>;
   importSession(): Promise<string | undefined>;
   select(id?: string): Promise<void>;
   command(id: string, command: Command): Promise<unknown>;

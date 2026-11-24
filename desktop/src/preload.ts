@@ -18,7 +18,7 @@ const api: Api = {
     return () => ipcRenderer.off("teamhub:state", handler);
   },
   folder: () => invoke("folder"),
-  create: path => invoke("create", path),
+  create: (path, text) => invoke("create", path, text),
   importSession: () => invoke("importSession"),
   select: id => invoke("select", id),
   command: (id, command) => invoke("command", id, command),

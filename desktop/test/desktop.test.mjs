@@ -158,14 +158,17 @@ test("desktop pets keep updating in minimized wzk and syh windows and return to 
     const configure = config => syh.evaluate(profile => window.teamhub.saveProfile(profile, "pet-test"), config);
     await configure(profile);
     await newSession(wzk);
+    await submit(wzk, "查看收到的消息");
+    await settled(wzk);
+    await wzk.getByRole("button", { name: "在 wzk project 中新建对话", exact: true }).click();
     await newSession(syh);
     await submit(syh, "运行通过样本");
     await animation("syh", "thinking");
     await submit(wzk, "生成一份桌宠验收报告");
     await expect(approval(wzk)).toBeVisible();
     const approvalSession = (await state(wzk)).active;
-    await wzk.evaluate(project => window.teamhub.create(project), wzkProject);
-    assert.notEqual((await state(wzk)).active, approvalSession);
+    await wzk.locator(".session-button").filter({ hasText: "查看收到的消息" }).click();
+    await expect.poll(async () => (await state(wzk)).active).not.toBe(approvalSession);
     await label("wzk", "待审批");
     await wzkWindow.evaluate(win => win.minimize());
     await syhWindow.evaluate(win => win.minimize());
@@ -324,6 +327,355 @@ async function submit(page, text) {
 async function settled(page, status = "completed") {
   await expect.poll(async () => (await current(page))?.events.findLast(e => e.type === "status")?.data, { timeout: 15_000 }).toBe(status);
 }
+
+test("workspace drafts enter history only after sending, and the toolbar plus opens the member picker", { timeout: 50_000 }, async () => {
+  const data = await appData();
+  const first = join(data, "project one");
+  const second = join(data, "project two");
+  await Promise.all([mkdir(first), mkdir(second)]);
+  let running = await launch(data, [first, second]);
+  try {
+    const { app, page, errors } = running;
+    await newSession(page);
+    assert.equal((await state(page)).conversations.length, 0);
+    await assert.rejects(readdir(join(data, "sessions")), { code: "ENOENT" });
+    await submit(page, "工作区一的首条消息");
+    await settled(page);
+    await page.getByRole("button", { name: "新建对话", exact: true }).click();
+    await newSession(page);
+    await expect(page.getByRole("heading", { name: "project two", level: 1 })).toBeVisible();
+    await submit(page, "工作区二的首条消息");
+    await expect(page.locator(".session-button").filter({ hasText: "工作区二的首条消息" })).toBeVisible();
+    await settled(page);
+    const before = await state(page);
+    const history = await readFile(join(data, "desktop.json"), "utf8");
+    const journals = await readdir(join(data, "sessions"));
+    const shortcut = page.getByRole("button", { name: "在 project one 中新建对话", exact: true });
+    await expect(shortcut.locator("svg.lucide-plus")).toBeVisible();
+    await shortcut.click();
+    await expect(page.getByRole("heading", { name: "project one", level: 1 })).toBeVisible();
+    await expect(page.getByRole("button", { name: "选择项目文件夹" })).toHaveCount(0);
+    await task(page).fill("未发送的草稿");
+    assert.equal((await state(page)).conversations.length, before.conversations.length);
+    assert.equal(await readFile(join(data, "desktop.json"), "utf8"), history);
+    assert.deepEqual(await readdir(join(data, "sessions")), journals);
+    await page.locator(".session-button").filter({ hasText: "工作区二的首条消息" }).click();
+    await expect(page.getByRole("button", { name: "检查点" })).toBeVisible();
+    await shortcut.click();
+    await expect(task(page)).toHaveValue("");
+    await submit(page, "从工作区加号发送的消息");
+    await expect(page.locator(".session-button").filter({ hasText: "从工作区加号发送的消息" })).toBeVisible();
+    await settled(page);
+    const after = await state(page);
+    assert.equal(after.conversations.length, before.conversations.length + 1);
+    assert.equal(after.conversations.find(group => group.members.some(member => member.id === after.active)).members[0].cwd, first);
+    assert.ok(before.conversations.every(group => group.members.every(member => member.id !== after.active)));
+
+    const memberPicker = page.getByRole("button", { name: "新建成员窗口", exact: true });
+    await expect(memberPicker.locator("svg.lucide-plus")).toBeVisible();
+    await expect(page.getByRole("button", { name: "协作状态", exact: true }).locator("svg.lucide-users")).toBeVisible();
+    const next = app.waitForEvent("window");
+    await memberPicker.click();
+    await expect((await next).getByRole("heading", { name: "选择成员" })).toBeVisible();
+    assert.deepEqual(errors, []);
+    await app.close();
+    running = await launch(data, [], { restore: true });
+    await expect(running.page.locator(".session-button").filter({ hasText: "从工作区加号发送的消息" })).toBeVisible();
+    await expect(running.page.locator(".session-button")).toHaveCount(3);
+  } finally { await running.app.close().catch(() => {}); }
+});
+
+test("streaming reasoning folds between visible messages and restores collapsed from the journal", { timeout: 70_000 }, async () => {
+  const data = await appData();
+  const project = join(data, "streaming project");
+  await mkdir(project);
+  const streams = new Map();
+  const server = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks));
+    if (body.stream !== true || body.reasoning?.summary !== "auto") {
+      res.writeHead(400).end();
+      return;
+    }
+    const prompt = JSON.parse(body.input[0].content.match(/^Current user request: (.+)$/m)[1]);
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    res.flushHeaders();
+    streams.set(prompt, (type, fields = {}) => {
+      res.write(`event: ${type}\r\ndata: ${JSON.stringify({ type, ...fields })}\r\n\r\n`);
+      if (type === "response.completed" || type === "error") res.end();
+    });
+  }).listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const start = async (page, prompt) => {
+    await submit(page, prompt);
+    await expect.poll(() => streams.has(prompt)).toBe(true);
+    return streams.get(prompt);
+  };
+  const summary = (push, id, delta) => push("response.reasoning_summary_text.delta", { item_id: id, summary_index: 0, delta });
+  const body = (push, id, delta) => push("response.output_text.delta", { item_id: id, content_index: 0, delta });
+  const summaryItem = (id, text) => ({ id, type: "reasoning", summary: [{ type: "summary_text", text }] });
+  const messageItem = (id, text) => ({ id, type: "message", content: [{ type: "output_text", text }] });
+  let running;
+  try {
+    running = await launch(data, [project]);
+    const { page, errors } = running;
+    await page.evaluate(profile => window.teamhub.saveProfile(profile, "stream-test"), {
+      mode: "model", externalHub: "", config: { model: {
+        protocol: "responses", endpoint: "http://127.0.0.1:" + server.address().port,
+        keyEnv: "TEAMHUB_STREAM_TEST", name: "stream-test",
+      } },
+    });
+    await newSession(page);
+    const currentReasoning = page.getByRole("button", { name: "思考中", exact: true });
+    const completed = page.getByRole("button", { name: "思考过程", exact: true });
+    const activity = page.locator(".timeline > [role=status]:last-child");
+    await expect(activity).toHaveCount(0);
+    const push = await start(page, "测试分段回复");
+    await expect(activity).toHaveText("正在运行");
+    push("response.reasoning_text.delta", { item_id: "private", delta: "provider-private field" });
+    summary(push, "a", "思考 A");
+    await expect(activity).toHaveText("正在思考");
+    await expect(currentReasoning).toHaveAttribute("aria-expanded", "true");
+    const firstId = await currentReasoning.getAttribute("aria-controls");
+    summary(push, "a", " 第一段增量");
+    await expect(page.getByText("思考 A 第一段增量", { exact: true })).toBeVisible();
+    await expect(currentReasoning).toHaveAttribute("aria-expanded", "true");
+    await expect(currentReasoning).toHaveAttribute("aria-controls", firstId);
+
+    const progress = ["中途说明", ...Array.from({ length: 40 }, (_, index) => `进度更新 ${index + 1}`)].join("\n\n");
+    body(push, "progress", progress);
+    summary(push, "b", "思考 B");
+    await expect(completed).toHaveAttribute("aria-expanded", "false");
+    await expect(currentReasoning).toHaveAttribute("aria-expanded", "true");
+    await expect(page.getByText("中途说明", { exact: true })).toBeVisible();
+    await expect(page.getByText("provider-private field")).toHaveCount(0);
+    await completed.press("Space");
+    summary(push, "b", " 第二段增量");
+    await expect(page.getByText("思考 B 第二段增量", { exact: true })).toBeVisible();
+    await expect(completed).toHaveAttribute("aria-expanded", "true");
+
+    const timeline = page.locator(".timeline-scroll");
+    await timeline.evaluate(box => { box.scrollTop = 0; box.dispatchEvent(new Event("scroll")); });
+    body(push, "final", "最终答复");
+    await expect(activity).toHaveText("正在回复");
+    await expect(completed).toHaveCount(2);
+    await expect(completed.nth(0)).toHaveAttribute("aria-expanded", "true");
+    await expect(completed.nth(1)).toHaveAttribute("aria-expanded", "false");
+    await expect(page.getByText("最终答复", { exact: true })).toBeVisible();
+    body(push, "final", " 已输出");
+    await expect(page.getByText("最终答复 已输出", { exact: true })).toBeVisible();
+    assert.equal(await timeline.evaluate(box => box.scrollTop), 0);
+    assert.deepEqual(await page.locator(".timeline > .reasoning, .timeline > .assistant-message").evaluateAll(rows =>
+      rows.map(row => row.querySelector("button, .markdown p")?.textContent)), ["思考过程", "中途说明", "思考过程", "最终答复 已输出"]);
+    assert.equal(await page.getByText("中途说明", { exact: true }).evaluate(node => {
+      const selection = getSelection();
+      selection.selectAllChildren(node);
+      const text = selection.toString();
+      selection.removeAllRanges();
+      return text;
+    }), "中途说明");
+    push("response.completed", { response: { output: [
+      summaryItem("a", "思考 A 第一段增量"), messageItem("progress", progress),
+      summaryItem("b", "思考 B 第二段增量"), messageItem("final", "最终答复 已输出"),
+    ] } });
+    await settled(page);
+    await expect(activity).toBeEmpty();
+    await expect(page.getByText("最终答复 已输出", { exact: true })).toHaveCount(1);
+
+    const cancel = await start(page, "测试生成中取消");
+    summary(cancel, "cancel", "取消前已收到");
+    await expect(currentReasoning).toHaveAttribute("aria-expanded", "true");
+    await currentReasoning.press("Enter");
+    summary(cancel, "cancel", " 取消前增量");
+    await expect(page.getByText("取消前已收到 取消前增量", { exact: true })).toBeAttached();
+    await expect(currentReasoning).toHaveAttribute("aria-expanded", "false");
+    await page.getByRole("button", { name: "中断", exact: true }).click();
+    await settled(page, "interrupted");
+    await expect(activity).toBeEmpty();
+    await expect(currentReasoning).toHaveCount(0);
+    await expect(completed.nth(2)).toHaveAttribute("aria-expanded", "false");
+    await completed.nth(2).click();
+    await expect(page.getByText("取消前已收到 取消前增量", { exact: true })).toBeVisible();
+    await expect(page.locator(".notice").filter({ hasText: "User interrupted" })).toBeVisible();
+
+    const fail = await start(page, "测试生成中失败");
+    summary(fail, "earlier", "独立思考");
+    await expect(currentReasoning).toHaveAttribute("aria-expanded", "true");
+    summary(fail, "failure", "失败前已收到");
+    await expect(completed.nth(3)).toHaveAttribute("aria-expanded", "false");
+    await expect(currentReasoning).toHaveAttribute("aria-expanded", "true");
+    fail("error", { message: "fixture disconnected" });
+    await settled(page, "failed");
+    await expect(activity).toBeEmpty();
+    await expect(currentReasoning).toHaveCount(0);
+    await expect(completed.nth(4)).toHaveAttribute("aria-expanded", "false");
+    await expect(page.getByRole("alert")).toContainText("模型连接失败");
+    await expect(page.getByText("Error: Model stream: fixture disconnected", { exact: true }).first()).toBeVisible();
+
+    await page.reload();
+    await expect(completed).toHaveCount(5);
+    await expect(currentReasoning).toHaveCount(0);
+    for (const button of await completed.all()) await expect(button).toHaveAttribute("aria-expanded", "false");
+    await expect(page.getByText("中途说明", { exact: true })).toBeVisible();
+    await expect(page.getByText("最终答复 已输出", { exact: true })).toBeVisible();
+    await completed.nth(4).click();
+    await expect(page.getByText("失败前已收到", { exact: true })).toBeVisible();
+    assert.deepEqual(errors, []);
+
+    await running.app.close();
+    running = await launch(data, [], { restore: true });
+    const restored = running.page;
+    const restoredReasoning = restored.getByRole("button", { name: "思考过程", exact: true });
+    await expect(restoredReasoning).toHaveCount(5);
+    for (const button of await restoredReasoning.all()) await expect(button).toHaveAttribute("aria-expanded", "false");
+    await restoredReasoning.first().click();
+    await expect(restored.getByText("思考 A 第一段增量", { exact: true })).toBeVisible();
+    await expect(restored.getByText("最终答复 已输出", { exact: true })).toBeVisible();
+  } finally {
+    await running?.app.close().catch(() => {});
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
+test("DeepSeek reasoning folds at Bash approval and user progress stays visible", { timeout: 70_000 }, async () => {
+  const data = await appData();
+  const project = join(data, "approval project");
+  await mkdir(project);
+  await writeFile(join(project, "index.html"), "<!doctype html><title>Approval test</title>");
+  const reasoning = [
+    `index.html does NOT have fx.css/fx.js tags yet. Earlier event said "index.html only appends 2 tags" — but apparently that wasn't done, or was reverted. Now I need to add them.`,
+    "The Bash hook exited code 1 — maybe cwd issue. Let me try again differently.",
+    `Let me read fx.js in chunks with read_file? read_file returns truncated excerpt... it truncated at 64KiB? Actually it says truncated true but the excerpt is short — odd. Maybe the file content has escaped quotes and it's small but truncated due to... Hmm the excerpt ends mid-file at "if (reduced) retu...". The output was truncated by the tool response limit perhaps.`,
+    "Let me use Bash to split file. Try a simpler command first. index.html has no fx tags yet — needs them. The Bash hook failed; let me retry.",
+  ];
+  const progress = "我已检查 index.html。接下来会用 Bash 核对两个文件的大小，需要你确认。";
+  const command = `node -e "const fs = require('fs'); console.log(fs.readFileSync('fx.js','utf8').length, fs.readFileSync('fx.css','utf8').length)"`;
+  const requests = [];
+  const server = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks));
+    if (body.stream !== true) { res.writeHead(400).end(); return; }
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    res.flushHeaders();
+    requests.push({
+      input: body.input,
+      push(type, fields = {}) {
+        res.write(`data: ${JSON.stringify({ type, ...fields })}\r\n\r\n`);
+        if (type === "response.completed") res.end();
+      },
+    });
+  }).listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const request = async index => {
+    await expect.poll(() => requests.length).toBe(index + 1);
+    return requests[index];
+  };
+  const call = (id, name, args) => ({ type: "function_call", call_id: id, name, arguments: JSON.stringify(args) });
+  const message = (id, text) => ({ type: "message", id, content: [{ type: "output_text", text }] });
+  const final = "已处理审批结果。";
+  let running;
+  try {
+    running = await launch(data, [project, project]);
+    const { page, errors } = running;
+    await page.evaluate(profile => window.teamhub.saveProfile(profile, "approval-test"), {
+      mode: "model", externalHub: "", config: { model: {
+        protocol: "responses", endpoint: "http://127.0.0.1:" + server.address().port,
+        keyEnv: "TEAMHUB_REASONING_APPROVAL_TEST", name: "deepseek-flash",
+      } },
+    });
+    const folded = page.getByRole("button", { name: "思考过程", exact: true });
+    const active = page.getByRole("button", { name: "思考中", exact: true });
+    const userProgress = page.getByText(progress, { exact: true });
+    const approvalCard = page.getByRole("region", { name: "工具审批" });
+    const activity = page.locator(".timeline > [role=status]:last-child");
+    const reject = approvalCard.getByRole("button", { name: "拒绝", exact: true });
+    const needle = page.getByText(reasoning.at(-1), { exact: true });
+    for (const [index, withProgress] of [false, true].entries()) {
+      if (index) await page.getByRole("button", { name: "新建对话", exact: true }).click();
+      await newSession(page);
+      await submit(page, withProgress ? "读取文件，发进度说明并申请 Bash" : "读取文件并申请 Bash");
+      const offset = index * 3;
+      const read = await request(offset);
+      read.push("response.completed", { response: { output: [call("read-index", "read_file", { path: "index.html" })] } });
+      const bash = await request(offset + 1);
+      const readResult = bash.input.find(item => item.type === "function_call_output" && item.call_id === "read-index");
+      assert.equal(JSON.parse(readResult.output).ok, true);
+      await expect(page.locator(".tool").filter({ hasText: "read_file" })).toContainText("成功");
+
+      const id = "reasoning-before-bash";
+      const reasoningItem = { id, type: "reasoning", summary: [], content: [{ type: "reasoning_text", text: reasoning.join("\n\n") }] };
+      bash.push("response.output_item.added", { item: { id, type: "reasoning", summary: [] } });
+      for (const [part, text] of reasoning.entries()) {
+        bash.push("response.reasoning_text.delta", { item_id: id, content_index: 0, delta: (part ? "\n\n" : "") + text });
+      }
+      await expect(active).toHaveAttribute("aria-expanded", "true");
+      await expect(needle).toBeVisible();
+      const output = [reasoningItem];
+      if (withProgress) {
+        output.push(message("progress", progress));
+        bash.push("response.output_text.delta", { item_id: "progress", content_index: 0, delta: progress });
+        await expect(userProgress).toBeVisible();
+        await expect(approvalCard).toHaveCount(0);
+      }
+      bash.push("response.output_item.done", { item: reasoningItem });
+      output.push(call("shell", "Bash", { command }));
+      bash.push("response.completed", { response: { output } });
+
+      await expect(approvalCard).toBeVisible();
+      await expect(activity).toHaveText("等待审批");
+      await expect(activity.locator(".timeline-activity-spinner")).toHaveCount(0);
+      await expect(folded).toHaveCount(1);
+      await expect(folded).toHaveAttribute("aria-expanded", "false");
+      await expect(needle).toBeHidden();
+      await expect(approvalCard.locator("pre")).toHaveText(command + "\n\n工作目录  " + project);
+      await expect(approval(page)).toBeEnabled();
+      await expect(reject).toBeEnabled();
+      for (const locator of [folded, approvalCard.locator("pre"), approval(page), reject]) {
+        await expect(locator).toBeInViewport({ ratio: 1 });
+      }
+      if (withProgress) await expect(userProgress).toBeInViewport({ ratio: 1 });
+      assert.deepEqual(await page.locator(".timeline > .reasoning, .timeline > .assistant-message, .timeline > div:has(> .tool)")
+        .evaluateAll(rows => rows.map(row => row.querySelector(".tool-title code, .reasoning button, .markdown p").textContent)),
+      withProgress ? ["read_file", "思考过程", progress, "Bash"] : ["read_file", "思考过程", "Bash"]);
+      const pendingState = await current(page);
+      assert.equal(pendingState.events.filter(e => e.type === "assistant_output" && e.data.kind === "reasoning")
+        .map(e => e.data.text).join(""), reasoning.join("\n\n"));
+      assert.equal(pendingState.events.find(e => e.type === "assistant" && e.data.calls?.[0]?.name === "Bash").data.text,
+        withProgress ? progress : "");
+
+      await folded.click();
+      await expect(needle).toBeVisible();
+      await folded.click();
+      await expect(needle).toBeHidden();
+      await reject.click();
+      const after = await request(offset + 2);
+      await expect(activity).toHaveText("正在运行");
+      assert.equal(after.input.some(item => item.content?.includes("Let me use Bash to split file")), false);
+      assert.equal(after.input.some(item => item.role === "assistant" && item.content === progress), withProgress);
+      after.push("response.completed", { response: { output: [message("final", final)] } });
+      await settled(page);
+      await expect(approvalCard).toHaveCount(0);
+      if (withProgress) await expect(userProgress).toBeVisible();
+    }
+    assert.deepEqual(errors, []);
+    await running.app.close();
+    running = await launch(data, [], { restore: true });
+    const restored = running.page;
+    const restoredReasoning = restored.getByRole("button", { name: "思考过程", exact: true });
+    await expect(restoredReasoning).toHaveAttribute("aria-expanded", "false");
+    await expect(restored.getByText(progress, { exact: true })).toBeVisible();
+    await restoredReasoning.click();
+    await expect(restored.getByText(reasoning.at(-1), { exact: true })).toBeVisible();
+  } finally {
+    await running?.app.close().catch(() => {});
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
 async function menuPicker(app) {
   const next = app.waitForEvent("window");
   await app.evaluate(({ Menu }) => {
@@ -352,7 +704,7 @@ test("Windows renderer approves one real report, revises it, restores history, a
       node.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true }));
       node.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
     });
-    assert.equal((await current(page)).events.some(e => e.type === "user"), false);
+    assert.equal((await state(page)).conversations.length, 0);
     await submit(page, "读取 north.txt 和 south.txt，生成资料报告");
     await expect(approval(page)).toBeVisible();
     await assert.rejects(readFile(file), { code: "ENOENT" });
@@ -463,9 +815,8 @@ test("three member windows share one Hub, have independent turns, and survive cl
     assert.deepEqual(await duplicateExit, [0, null], stderr);
     await newSession(carol);
     assert.equal(app.windows().length, 3);
-    for (const [page, peer, cwd] of [[alice, "alice", alicePath], [bob, "bob", bobPath], [carol, "carol", bobPath]]) {
-      const window = await app.browserWindow(page);
-      assert.equal(await window.evaluate(win => win.getTitle()), "TeamHub · " + peer + " · " + cwd);
+    for (const [page, cwd] of [[alice, alicePath], [bob, bobPath], [carol, bobPath]]) {
+      await expect(page.locator(".topbar-title code")).toHaveText(cwd);
     }
 
     const existing = await menuPicker(app);
@@ -568,6 +919,7 @@ test("missing credentials, connection errors, and external Hub ownership", { tim
     await submit(page, "模型测试");
     await expect(page.getByText("缺少模型密钥")).toBeVisible();
     await expect(task(page)).toHaveValue("模型测试");
+    assert.equal((await state(page)).conversations.length, 0);
     await set(profile, "in-memory-key");
     await submit(page, "模型失败测试");
     await settled(page, "failed");
@@ -580,9 +932,14 @@ test("missing credentials, connection errors, and external Hub ownership", { tim
     await set({ mode: "offline", config: {}, externalHub: endpoint });
     await page.getByRole("button", { name: "新建对话", exact: true }).click();
     await newSession(page);
+    await submit(page, "Hub 连通测试消息");
     await expect(page.getByText("Hub 离线")).toBeVisible();
+    await expect(task(page)).toHaveValue("Hub 连通测试消息");
+    assert.equal((await state(page)).conversations.length, 1);
     await set({ mode: "offline", config: {}, externalHub: hub });
-    await expect.poll(async () => (await current(page)).phase).toBe("ready");
+    await submit(page, "Hub 连通测试消息");
+    await expect(page.locator(".session-button").filter({ hasText: "Hub 连通测试消息" })).toBeVisible();
+    await settled(page);
     await app.close();
     assert.equal((await fetch(hub + "/health")).status, 200);
     assert.deepEqual(errors, []);
