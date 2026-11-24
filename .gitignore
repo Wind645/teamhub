@@ -8,3 +8,6 @@ data/
 # Local Codex configuration containing credentials
 /examples/config.alice.local.toml
 /examples/config.alice.local.toml*
+desktop/build/
+desktop/release/
+desktop/test-results/

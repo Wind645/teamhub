@@ -17,11 +17,14 @@ const server = app.listen(port, host, (error) => {
     process.exitCode = 1;
     return;
   }
+  const address = server.address();
+  const boundPort = typeof address === "object" && address ? address.port : port;
+  process.send?.({ type: "listening", port: boundPort });
   console.log(
     JSON.stringify({
       service: "teamhub",
-      mcp_url: `http://${host}:${port}/mcp/<peer_id>`,
-      health_url: `http://${host}:${port}/health`,
+      mcp_url: `http://${host}:${boundPort}/mcp/<peer_id>`,
+      health_url: `http://${host}:${boundPort}/health`,
       database: databasePath,
     }),
   );
@@ -37,3 +40,4 @@ async function shutdown(signal: string): Promise<void> {
 
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
+if (process.send) process.on("disconnect", () => void shutdown("IPC disconnect"));

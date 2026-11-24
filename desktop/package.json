@@ -1,0 +1,54 @@
+{
+  "name": "teamhub-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TeamHub desktop workspace",
+  "author": "TeamHub",
+  "type": "module",
+  "main": "build/main.cjs",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "node build.mjs",
+    "start": "electron .",
+    "test": "node --test test/*.test.mjs",
+    "package:win": "npm run build && electron-builder --win zip --x64"
+  },
+  "dependencies": {
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-markdown": "^10.0.0",
+    "remark-gfm": "^4.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.0",
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "electron": "^41.0.0",
+    "electron-builder": "^26.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.0.0"
+  },
+  "optionalDependencies": {
+    "node-win-x64": "24.19.0"
+  },
+  "build": {
+    "appId": "com.teamhub.desktop",
+    "productName": "TeamHub",
+    "directories": { "output": "release" },
+    "files": ["build/main.cjs", "build/preload.cjs", "build/pet-preload.cjs", "build/ui/**/*", "package.json", "!node_modules/**/*"],
+    "extraResources": [
+      { "from": "build/runtime", "to": "runtime", "filter": ["worker.cjs", "hub.cjs", "hook.mjs"] }
+    ],
+    "win": {
+      "icon": "assets/teamhub.ico",
+      "signExecutable": false,
+      "artifactName": "TeamHub-Windows-${arch}.${ext}",
+      "extraResources": [
+        { "from": "node_modules/node-win-x64/bin/node.exe", "to": "runtime/node.exe" }
+      ]
+    }
+  }
+}

@@ -11,8 +11,8 @@ export class Journal {
   readonly file: string;
   readonly events: Event[] = [];
 
-  constructor(directory: string, readonly cwd: string, id?: string) {
-    this.id = id ?? randomUUID();
+  constructor(directory: string, readonly cwd: string, id?: string, createId?: string) {
+    this.id = id ?? createId ?? randomUUID();
     if (!/^[a-zA-Z0-9_-]{1,80}$/.test(this.id)) throw new Error("Invalid session ID");
     mkdirSync(directory, { recursive: true });
     this.file = resolve(directory, `${this.id}.jsonl`);

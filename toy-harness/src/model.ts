@@ -35,11 +35,11 @@ export class ScriptModel implements Model {
 }
 
 export class HttpModel implements Model {
-  constructor(private readonly config: ModelConfig) {}
+  constructor(private readonly config: ModelConfig, private readonly credential?: () => string | undefined) {}
 
   async next(messages: Message[], tools: ToolSpec[], signal: AbortSignal): Promise<Reply> {
     const { endpoint, name, keyEnv, protocol } = this.config;
-    const credential = process.env[keyEnv];
+    const credential = this.credential?.() ?? process.env[keyEnv];
     if (!credential) throw new Error(`Set the model credential environment variable ${keyEnv}`);
     const functions = tools.map(({ name, description, schema }) => ({
       name, description, parameters: schema,

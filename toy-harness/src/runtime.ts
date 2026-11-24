@@ -9,7 +9,9 @@ export type HookReply = {
   systemMessage?: string; hookSpecificOutput?: { additionalContext?: string };
 };
 export type Hook = (input: Args) => Promise<HookReply>;
-export type Approval = (tool: Tool, args: Args, signal: AbortSignal) => Promise<boolean>;
+export type Approval = (tool: Tool, args: Args, signal: AbortSignal, identity: {
+  turn: string; request: number; callId: string;
+}) => Promise<boolean>;
 export type RuntimeOptions = {
   journal: Journal; model: Model; registry: Registry; instructions: string;
   approve: Approval; hook?: Hook; emit?: (event: Event) => void;
@@ -203,9 +205,10 @@ export class Runtime {
       decision.throwIfAborted();
       const { tool, args } = this.options.registry.check(call);
       const approved = tool.permission === "ask"
-        ? await this.options.approve(tool, args, AbortSignal.any([signal, decision]))
+        ? await this.options.approve(tool, args, AbortSignal.any([signal, decision]), { turn, request, callId: call.id })
         : tool.permission === "allow";
       decision.throwIfAborted();
+      signal.throwIfAborted();
       if (!approved) {
         throw new Error("Denied by local tool policy");
       }
