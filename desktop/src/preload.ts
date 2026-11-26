@@ -12,10 +12,13 @@ const api: Api = {
   memberPicker: () => invoke("memberPicker"),
   setPetsEnabled: enabled => invoke("setPetsEnabled", enabled),
   state: () => invoke("state"),
+  watchState: () => ipcRenderer.send("teamhub:watch-state"),
+  ackState: revision => ipcRenderer.send("teamhub:ack-state", revision),
   subscribe(callback) {
-    const handler = (_event: Electron.IpcRendererEvent, state: Snapshot) => callback(state);
+    const handler = (_event: Electron.IpcRendererEvent, state: Snapshot | import("./state-stream.js").StatePacket) => callback(state);
     ipcRenderer.on("teamhub:state", handler);
-    return () => ipcRenderer.off("teamhub:state", handler);
+    ipcRenderer.on("teamhub:live-state", handler);
+    return () => { ipcRenderer.off("teamhub:state", handler); ipcRenderer.off("teamhub:live-state", handler); };
   },
   folder: () => invoke("folder"),
   create: (path, text, approvalMode) => invoke("create", path, text, approvalMode),

@@ -16,6 +16,7 @@ export type RuntimeOptions = {
   journal: Journal; model: Model; registry: Registry; instructions: string;
   approve: Approval; hook?: Hook; emit?: (event: Event) => void;
   steps: number; context: number; turnTimeout: number;
+  autoPause?: boolean;
 };
 
 const superseded = new Error("Tool call skipped because a newer user instruction arrived");
@@ -137,14 +138,15 @@ export class Runtime {
     const { signal } = controller;
     const active: NonNullable<Runtime["active"]> = { id: turn, controller };
     this.active = active;
-    const timer = setTimeout(() => controller.abort(new Error("Turn time budget reached")), this.options.turnTimeout);
+    const timer = this.options.autoPause === false ? undefined :
+      setTimeout(() => controller.abort(new Error("Turn time budget reached")), this.options.turnTimeout);
     this.add("status", "running", turn);
     try {
       const originalPrompt = prompt ?? this.journal.active().find(event => event.type === "user" && event.turn === turn)?.data;
       const register = (event: "UserPromptSubmit" | "TurnResume") =>
         this.hook(event, turn, { prompt: originalPrompt }).then(result => this.enforce(result));
       await register(prompt === undefined ? "TurnResume" : "UserPromptSubmit");
-      for (let step = 0; step < this.options.steps; step++) {
+      for (let step = 0; this.options.autoPause === false || step < this.options.steps; step++) {
         signal.throwIfAborted();
         const decision = new AbortController();
         active.step = decision;

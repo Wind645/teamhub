@@ -50,7 +50,9 @@ export type Api = {
   memberPicker(): Promise<void>;
   setPetsEnabled(enabled: boolean): Promise<void>;
   state(): Promise<Snapshot>;
-  subscribe(callback: (state: Snapshot) => void): () => void;
+  watchState(): void;
+  ackState(revision: number): void;
+  subscribe(callback: (state: Snapshot | import("./state-stream.js").StatePacket) => void): () => void;
   folder(): Promise<string | undefined>;
   create(path: string, text: string, approvalMode?: ApprovalMode): Promise<{ id: string } | { issue: Issue }>;
   importSession(): Promise<string | undefined>;

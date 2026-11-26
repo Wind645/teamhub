@@ -10,6 +10,8 @@ import { approvalModes, type Api, type ApprovalMode, type Command, type Conversa
 import { initialProfile, migrateIndex, peerId, type MemberIndex, type MemberRecord } from "./members.js";
 import { memberPet, PetActivity, type PetPreferences } from "./pet-state.js";
 import { PetWindow } from "./pet-window.js";
+import { coalesceUpdates, protectRenderer } from "./ui-health.js";
+import { StatePublisher } from "./state-stream.js";
 
 if (process.env.TEAMHUB_DESKTOP_DATA) app.setPath("userData", resolve(process.env.TEAMHUB_DESKTOP_DATA));
 const data = app.getPath("userData");
@@ -165,12 +167,16 @@ const snapshot = (record: MemberRecord): Snapshot => ({
   school, hasKey: Boolean(currentKey(record.peer, record.profile)), canStoreKey: secureStorageAvailable(),
   petsEnabled: petPreferences.enabled,
 });
+const statePublisher = new StatePublisher();
 function publish(peer?: Peer) {
   for (const [id, { window, record }] of windows) {
-    if ((peer === undefined || id === peer) && !window.isDestroyed()) window.webContents.send("teamhub:state", snapshot(record));
+    if ((peer === undefined || id === peer) && !window.isDestroyed() && !window.webContents.isDestroyed()) {
+      statePublisher.publish(window.webContents, () => snapshot(record));
+    }
   }
   publishPets();
 }
+const publishWorker = coalesceUpdates<Peer>(publish);
 function child(entry: string, extra: NodeJS.ProcessEnv = {}, keyEnv?: string) {
   const env: NodeJS.ProcessEnv = {
     ...process.env, ...extra,
@@ -340,7 +346,8 @@ class Worker {
             if (message.issue) request?.reject(message.issue);
             else request?.resolve(message.result);
           }
-          publish(this.peer);
+          if (message.type === "event" && message.event.type !== "status") publishWorker(this.peer);
+          else publish(this.peer);
         });
         const message: WorkerRequest = {
           type: "init", member, directory: directory(member), exists: existsSync(journalFile(member)),
@@ -450,7 +457,8 @@ function activeEvents(events: Event[]) {
 function profileOf(value: Profile): Profile {
   if (!value || !["offline", "model"].includes(value.mode) || typeof value.externalHub !== "string" ||
       !value.config || typeof value.config !== "object") throw new Error("模型设置格式无效");
-  const { model, permissions, allowedCommands, hookTimeout, steps, context, commandTimeout, outputLimit, turnTimeout } = value.config;
+  const { model, permissions, allowedCommands, hookTimeout, steps, context, commandTimeout, outputLimit, turnTimeout, autoPause } = value.config;
+  if (autoPause !== undefined && typeof autoPause !== "boolean") throw new Error("自动暂停设置必须为开或关");
   if (value.mode === "model" || model) {
     if (!model || !model.name?.trim() || !/^[A-Za-z_][A-Za-z_0-9]*$/.test(model.keyEnv) ||
         (model.protocol && !["chat", "responses"].includes(model.protocol))) throw new Error("请填写模型、协议和密钥环境变量名");
@@ -464,7 +472,7 @@ function profileOf(value: Profile): Profile {
   }
   return { mode: value.mode, externalHub: value.externalHub.trim() ? hubOrigin(value.externalHub.trim()) : "",
     config: { model: model && { name: model.name, endpoint: model.endpoint, protocol: model.protocol, keyEnv: model.keyEnv },
-      permissions, allowedCommands, hookTimeout, steps, context, commandTimeout, outputLimit, turnTimeout } };
+      permissions, allowedCommands, hookTimeout, steps, context, commandTimeout, outputLimit, turnTimeout, autoPause } };
 }
 function select({ window, record }: MemberWindow, id?: string) {
   const member = memberOf(record, id);
@@ -493,7 +501,7 @@ function add(owner: MemberWindow, group: Conversation) {
   select(owner, group.members[0].id);
   return group.members[0].id;
 }
-function memberApi(owner: MemberWindow): Omit<Api, "subscribe" | "members" | "openMember"> {
+function memberApi(owner: MemberWindow): Omit<Api, "subscribe" | "members" | "openMember" | "watchState" | "ackState"> {
   const { window, record } = owner;
   return {
     async memberPicker() { openPicker(); },
@@ -689,10 +697,13 @@ function createWindow(title: string, chooser = false) {
     minWidth: chooser ? 380 : 530, minHeight: 440, show: false,
     icon: join(__dirname, "ui", "teamhub.png"),
     backgroundColor: nativeTheme.shouldUseDarkColors ? "#211c19" : "#faf6ed",
-    webPreferences: { preload: join(__dirname, "preload.cjs"), nodeIntegration: false, contextIsolation: true, sandbox: true },
+    webPreferences: { preload: join(__dirname, "preload.cjs"), nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false },
   });
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  window.webContents.on("will-navigate", event => event.preventDefault());
+  protectRenderer(window, dialog, data);
+  window.webContents.on("will-navigate", event => {
+    if (event.url !== window.webContents.getURL()) event.preventDefault();
+  });
   window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   window.on("page-title-updated", event => event.preventDefault());
   window.once("ready-to-show", () => focus(window));
@@ -781,13 +792,20 @@ async function prepareQuit() {
   app.quit();
 }
 function registerApi() {
+  for (const channel of ["watch-state", "ack-state"]) ipcMain.on("teamhub:" + channel, (event, revision) => {
+    if (event.senderFrame !== event.sender.mainFrame) return;
+    const owner = [...windows.values()].find(item => item.window.webContents === event.sender);
+    if (!owner || owner.closing || quitting) return;
+    if (channel === "watch-state") statePublisher.watch(event.sender, () => snapshot(owner.record));
+    else if (Number.isSafeInteger(revision)) statePublisher.ack(event.sender, revision);
+  });
   const pickerApi = {
     async members() {
       return index.members.map(({ peer, cwd }) => ({ peer, cwd, open: windows.has(peer) }));
     },
     openMember,
   };
-  const channels: Array<keyof Omit<Api, "subscribe">> = [
+  const channels: Array<keyof Omit<Api, "subscribe" | "watchState" | "ackState">> = [
     "members", "openMember", "memberPicker", "state", "folder", "create", "importSession",
     "select", "setApprovalMode", "command", "retry", "peers", "importProfile", "saveProfile", "artifact", "confirm", "setPetsEnabled",
   ];

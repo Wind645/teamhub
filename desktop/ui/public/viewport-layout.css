@@ -1,0 +1,10 @@
+/* The window is the layout boundary. Content scrolls inside its own pane;
+   grid/flex automatic minimum sizes must not grow the document with history. */
+html, body, #root { height: 100%; min-height: 0; }
+body { overflow: hidden; }
+.app { grid-template-rows: minmax(0, 1fr); min-height: 0; overflow: hidden; }
+.sidebar, .main, .session-layout, .session-main { min-height: 0; }
+.sidebar, .session-layout, .session-main { overflow: hidden; }
+.session-layout, .timeline-scroll { min-width: 0; }
+.sidebar > .brand, .sidebar > .new-button, .sidebar-bottom { flex-shrink: 0; }
+.workspace-list, .timeline-scroll { overscroll-behavior: contain; }

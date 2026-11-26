@@ -1,12 +1,14 @@
 import React, { useEffect, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { subscribeLiveState } from "./live-state.js";
+import { activeEvents, timelineRows } from "./timeline-model.js";
 import { createRoot } from "react-dom/client";
 import { ArrowUp, Check, ChevronDown, CircleAlert, Clock, FileText, Folder, FolderOpen, Hand, History, LoaderCircle, Menu, Plus, RotateCcw, Settings, ShieldAlert, ShieldCheck, Square, Terminal, Users, X } from "lucide-react";
 import Markdown from "react-markdown";
 import gfm from "remark-gfm";
 import { approvalModes, type Api, type ApprovalMode, type Command, type Issue, type LocalMember, type Member, type Pending, type Profile, type SessionState, type Snapshot } from "../src/protocol";
 import type { Event } from "../../toy-harness/src/journal";
-import { timelineRows } from "./timeline";
 import "./style.css";
+import { HistoryWindow, toolIndex } from "./history-performance";
 
 declare global { interface Window { teamhub: Api } }
 const api = window.teamhub;
@@ -25,14 +27,6 @@ const friendly = (text: string) => ({
   "Tool call skipped because a newer user instruction arrived": "已跳过旧调用，等待处理追加指令",
   "User interrupted": "用户已中断",
 } as Record<string, string>)[text] ?? text;
-function activeEvents(events: Event[]) {
-  let result: Event[] = [];
-  for (const event of events) {
-    if (event.type === "rollback") result = result.filter(item => item.seq <= Number(event.data));
-    else result.push(event);
-  }
-  return result;
-}
 function status(state?: SessionState, events = activeEvents(state?.events ?? [])) {
   if (state?.pending) return { key: "pending", text: "等待审批" };
   if (state?.phase === "starting") return { key: "running", text: "连接中" };
@@ -49,16 +43,16 @@ function IconButton({ label, click, children, pressed, disabled }: {
 function BrandMark() {
   return <img className="brand-mark" src="./teamhub.png" alt="" width={32} height={32} />;
 }
-function Status({ state }: { state?: SessionState }) {
+const Status = React.memo(function Status({ state }: { state?: SessionState }) {
   const label = status(state);
   return <span className={"status " + label.key}><i />{label.text}</span>;
-}
-function RichText({ text }: { text: string }) {
+});
+const RichText = React.memo(function RichText({ text }: { text: string }) {
   return <div className="markdown"><Markdown skipHtml remarkPlugins={[gfm]} components={{
     a: ({ children }) => <span>{children}</span>,
     img: ({ alt }) => <span>{alt}</span>,
   }}>{text}</Markdown></div>;
-}
+});
 function Reasoning({ id, text, active }: { id: string; text: string; active: boolean }) {
   const [choice, setChoice] = useState<boolean>();
   const expanded = choice ?? active;
@@ -66,7 +60,7 @@ function Reasoning({ id, text, active }: { id: string; text: string; active: boo
     <button type="button" aria-expanded={expanded} aria-controls={id} onClick={() => setChoice(!expanded)}>
       <ChevronDown size={15} aria-hidden="true" />{active ? "思考中" : "思考过程"}
     </button>
-    <div id={id} hidden={!expanded} className="reasoning-body"><RichText text={text} /></div>
+    {expanded && <div id={id} className="reasoning-body">{active ? <div className="streaming-text">{text}</div> : <RichText text={text} />}</div>}
   </div>;
 }
 function Disclosure({ label, text }: { label: string; text: string }) {
@@ -92,11 +86,12 @@ function ToolRow({ event, events, pending, member, act, report }: {
   act: (request: Pending, allow: boolean) => Promise<unknown>; report: (error: unknown) => void;
 }) {
   const { request, call } = event.data as { request: number; call: { name: string; id: string; args?: Record<string, unknown> } };
-  const resultEvent = events.find(item => item.type === "result" && (item.data as { request: number }).request === request);
+  const resultEvent = toolIndex(events).results.get(request);
   const result = (resultEvent?.data as { result: { ok: boolean; value?: unknown; artifact?: string; reason?: string } } | undefined)?.result;
-  const uncertain = events.some(item => item.type === "uncertain" && (item.data as { request: number }).request === request);
+  const uncertain = toolIndex(events).uncertain.has(request);
   const approval = pending?.request === request && pending.turn === event.turn && pending.callId === call.id ? pending : undefined;
   const [answered, setAnswered] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const args = approval?.args ?? call.args ?? {};
   const patch = typeof args.input === "string" && call.name === "apply_patch" ? args.input : undefined;
   const command = args.command ? String(args.command) : undefined;
@@ -104,22 +99,22 @@ function ToolRow({ event, events, pending, member, act, report }: {
   const object = patch?.match(/^\*\*\* (?:Add|Update) File: (.+)$/m)?.[1] ??
     (args.path ? String(args.path) : command ?? recipient);
   const state = uncertain ? "待核实" : result ? result.ok ? "成功" : "未完成" : approval ? "等待审批" : "进行中";
-  const detail = patch ?? (command ? command + "\n\n工作目录  " + member.cwd :
-    recipient ? "收件人  " + recipient + "\n\n" + stringify(args.message) : stringify(args));
+  const detail = expanded || approval ? patch ?? (command ? command + "\n\n工作目录  " + member.cwd :
+    recipient ? "收件人  " + recipient + "\n\n" + stringify(args.message) : stringify(args)) : "";
   const handle = (allow: boolean) => {
     if (!approval || answered) return;
     setAnswered(true);
     void act(approval, allow).catch(error => { setAnswered(false); report(error); });
   };
   return <div className="tool">
-    <details>
+    <details onToggle={event => { if (event.target === event.currentTarget) setExpanded(event.currentTarget.open); }}>
       <summary><Terminal size={15} /><span className="tool-title"><code>{call.name}</code>{object && <span title={object}> · {object}</span>}</span>
         <span className={"tool-state " + (approval || uncertain ? "attention" : "")}>{state}</span><ChevronDown size={15} className="chevron" /></summary>
-      <div className="tool-body">
+      {expanded && <div className="tool-body">
         <pre>{detail}</pre>
         {result?.reason && <p>{friendly(result.reason)}</p>}
         {result?.value !== undefined && <Disclosure label="工具输出" text={stringify(result.value)} />}
-      </div>
+      </div>}
     </details>
     {approval && <section className="approval" aria-label="工具审批">
       <div className="approval-title"><CircleAlert size={16} /><strong>允许此工具调用？</strong></div>
@@ -211,6 +206,9 @@ function ModelSettings({ snapshot, close, report }: { snapshot: Snapshot; close:
   };
   return <Modal title="设置" close={close}>
     <form className="settings-form" onSubmit={event => void save(event)}>
+      <label className="checkbox"><input type="checkbox" role="switch" checked={profile.config.autoPause !== false}
+        onChange={event => setProfile({ ...profile, config: { ...profile.config, autoPause: event.target.checked } })} />达到运行上限后自动暂停</label>
+      <p className="muted">开启：达到步数或单轮时间上限后，需要手动继续。关闭：不因这两项上限暂停，仍可手动停止，审批和错误处理保持不变。仅影响当前成员；任务结束或停止后保存，下次运行或继续此回合时生效。</p>
       <label className="checkbox"><input type="checkbox" checked={snapshot.petsEnabled}
         onChange={event => void api.setPetsEnabled(event.target.checked).catch(report)} />显示桌宠</label>
       <div className="segment" aria-label="模型来源">
@@ -306,9 +304,7 @@ function App() {
   const composing = useRef(false);
 
   useEffect(() => {
-    const remove = api.subscribe(setSnapshot);
-    void api.state().then(setSnapshot).catch(error => setErrors({ "": String(error) }));
-    return remove;
+    return subscribeLiveState(api, setSnapshot, error => setErrors({ "": String(error) }));
   }, []);
   const id = newChat ? undefined : snapshot?.active;
   const groups = snapshot?.conversations ?? [];
@@ -486,12 +482,15 @@ function App() {
               {events.length <= 1 && <div className="empty-session"><FolderOpen size={26} /><h1>{base(cwd)}</h1><p>输入任务以开始对话</p>
                 {snapshot.profile.mode === "offline" && <button disabled={creating} onClick={() => { setDrafts(previous => ({ ...previous, [draftKey]: "生成一份报告" })); composer.current?.focus(); }}>试用：生成一份报告</button>}
               </div>}
-              {member && rows.map(row => {
+              {member && <HistoryWindow key={id} items={rows}
+                pendingSeq={state?.pending ? events.find(event => event.type === "request" &&
+                  (event.data as { request: number }).request === state.pending?.request && event.turn === state.pending.turn)?.seq : undefined}>
+                {row => {
                 if (row.kind !== "event") {
                   if (row.kind === "reasoning") return <Reasoning key={id + ":" + row.seq} id={"reasoning-" + row.seq}
                     text={row.text} active={row.active} />;
                   return <article key={row.seq} className="assistant-message">
-                    <div className="byline">{name(member)}</div><RichText text={row.text} /></article>;
+                    <div className="byline">{name(member)}</div>{row.active ? <div className="streaming-text">{row.text}</div> : <RichText text={row.text} />}</article>;
                 }
                 const { event } = row;
                 if (event.type === "user" || event.type === "steer") return <article className="user-message" key={event.seq}>
@@ -503,7 +502,7 @@ function App() {
                 if (event.type === "uncertain") return <p className="notice attention" key={event.seq}>待核实 · 先前调用可能已产生副作用</p>;
                 if (event.type === "resume") return <p className="notice" key={event.seq}>继续此回合</p>;
                 return null;
-              })}
+              }}</HistoryWindow>}
               {currentIssue && <IssueBox issue={currentIssue} settings={() => setModal("settings")}
                 retry={id && (currentIssue.kind === "hub" || currentIssue.kind === "session") ? () => void api.retry(id).then(() => setErrors(previous => ({ ...previous, [id]: "" }))).catch(report) : undefined} />}
               {member && <div className="timeline-activity" role="status">
