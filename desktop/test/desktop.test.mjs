@@ -539,7 +539,7 @@ test("streaming reasoning folds between visible messages and restores collapsed 
     await expect(page.getByText("最终答复 已输出", { exact: true })).toBeVisible();
     assert.equal(await timeline.evaluate(box => box.scrollTop), 0);
     assert.deepEqual(await page.locator(".timeline > .reasoning, .timeline > .assistant-message").evaluateAll(rows =>
-      rows.map(row => row.querySelector("button, .markdown p")?.textContent)), ["思考过程", "中途说明", "思考过程", "最终答复 已输出"]);
+      rows.map(row => row.querySelector("button, .markdown p, .streaming-text")?.textContent)), ["思考过程", "中途说明", "思考过程", "最终答复 已输出"]);
     assert.equal(await page.getByText("中途说明", { exact: true }).evaluate(node => {
       const selection = getSelection();
       selection.selectAllChildren(node);
@@ -560,7 +560,8 @@ test("streaming reasoning folds between visible messages and restores collapsed 
     await expect(currentReasoning).toHaveAttribute("aria-expanded", "true");
     await currentReasoning.press("Enter");
     summary(cancel, "cancel", " 取消前增量");
-    await expect(page.getByText("取消前已收到 取消前增量", { exact: true })).toBeAttached();
+    // Collapsed reasoning is unmounted; its full text must return on expansion below.
+    await expect(page.getByText("取消前已收到 取消前增量", { exact: true })).toHaveCount(0);
     await expect(currentReasoning).toHaveAttribute("aria-expanded", "false");
     await page.getByRole("button", { name: "中断", exact: true }).click();
     await settled(page, "interrupted");
@@ -664,7 +665,8 @@ test("DeepSeek reasoning folds at Bash approval and user progress stays visible"
     const approvalCard = page.getByRole("region", { name: "工具审批" });
     const activity = page.locator(".timeline > [role=status]:last-child");
     const reject = approvalCard.getByRole("button", { name: "拒绝", exact: true });
-    const needle = page.getByText(reasoning.at(-1), { exact: true });
+    // Streaming text is a single plain-text block; completed text becomes Markdown.
+    const needle = page.locator(".reasoning-body").filter({ hasText: reasoning.at(-1) });
     for (const [index, withProgress] of [false, true].entries()) {
       if (index) await page.getByRole("button", { name: "新建对话", exact: true }).click();
       await newSession(page);
