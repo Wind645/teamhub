@@ -3,6 +3,10 @@ import type { ModelConfig } from "../../toy-harness/src/model.js";
 import type { Config } from "../../toy-harness/src/session.js";
 
 export type Peer = string;
+export type RoomMessage = { id: string; peer: Peer; at: string; text: string };
+export function roomTranscript(messages: RoomMessage[]) {
+  return messages.map(m => "### " + m.peer + " · " + m.at + "\n\n" + m.text).join("\n\n");
+}
 export const approvalModes = ["request", "auto", "full"] as const;
 export type ApprovalMode = typeof approvalModes[number];
 export type Profile = {
@@ -26,6 +30,7 @@ export type SessionState = {
   events: Event[]; phase: "idle" | "starting" | "ready"; pending?: Pending; issue?: Issue;
 };
 export type Snapshot = {
+  roomVersions?: Record<string, number>;
   peer: Peer;
   profile: Profile; school: ModelConfig; canStoreKey: boolean; hasKey: boolean;
   petsEnabled: boolean;
@@ -48,6 +53,9 @@ export type WorkerMessage =
   | { type: "fatal"; issue: Issue }
   | { type: "response"; id: number; result?: unknown; issue?: Issue };
 export type Api = {
+  room(path: string): Promise<RoomMessage[]>;
+  postRoom(path: string, text: string): Promise<void>;
+  exportRoom(path: string): Promise<void>;
   members(): Promise<LocalMember[]>;
   openMember(peer: string): Promise<void>;
   memberPicker(): Promise<void>;

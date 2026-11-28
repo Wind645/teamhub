@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, safeStorage, shell } from "electron";
 import { fork, spawn, type ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { roomTranscript, type RoomMessage } from "./protocol.js";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Event } from "../../toy-harness/src/journal.js";
@@ -22,7 +23,15 @@ const school = schoolPreset.model as ModelConfig;
 const indexPath = join(data, "desktop.json");
 const petPath = join(data, "desktop-pets.json");
 type Credential = { identity: string; value: string };
-type MemberWindow = { window: BrowserWindow; record: MemberRecord; closing: boolean; saving: boolean };
+type MemberWindow = { window: BrowserWindow; record: MemberRecord; closing: boolean; saving: boolean; pickedWorkspace?: string };
+const roomVersions = new Map<string, number>();
+function roomFile(path: string) {
+  const key = process.platform === "win32" ? path.toLowerCase() : path;
+  return join(data, "rooms", createHash("sha256").update(key).digest("hex") + ".json");
+}
+function readRoom(file: string): RoomMessage[] {
+  return existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : [];
+}
 const sessions: Record<string, SessionState> = Object.create(null);
 const workers = new Map<string, Worker>();
 const windows = new Map<Peer, MemberWindow>();
@@ -179,6 +188,7 @@ const snapshot = (record: MemberRecord): Snapshot => {
     return members.length ? [{ ...group, members: members.map(m => ({ ...m, peer: host.peer })) }] : [];
   }));
   return {
+  roomVersions: Object.fromEntries([...new Set([...conversations.flatMap(g => g.members.map(m => m.cwd)), windows.get(record.peer)?.pickedWorkspace].filter((p): p is string => Boolean(p)))].map(p => [p, roomVersions.get(roomFile(p)) ?? 0])),
   peer: record.peer, profile: { ...record.profile, externalHub: index.externalHub },
   conversations, active: accessible(record, record.active) ? record.active : undefined,
   sessions: Object.fromEntries(conversations.flatMap(group => group.members.map(m => [m.id, sessions[m.id]]))),
@@ -523,7 +533,28 @@ function add(owner: MemberWindow, group: Conversation) {
 }
 function memberApi(owner: MemberWindow): Omit<Api, "subscribe" | "members" | "openMember" | "watchState" | "ackState"> {
   const { window, record } = owner;
+  function checkedRoom(path: string) {
+    if (owner.pickedWorkspace !== path && !index.members.some(host => conversationsOf(host).some(m =>
+      m.cwd === path && (host === record || m.access === "edit" || m.access === "view")))) throw new Error("无法访问此工作区");
+    return roomFile(path);
+  }
   return {
+    async room(path) { return readRoom(checkedRoom(path)); },
+    async postRoom(path, text) {
+      const file = checkedRoom(path);
+      if (typeof text !== "string" || !text.trim() || text.length > 20000) throw new Error("请输入 1 至 20000 字的消息");
+      const messages = readRoom(file);
+      messages.push({ id: randomUUID(), peer: record.peer, at: new Date().toISOString(), text: text.trim() });
+      mkdirSync(dirname(file), { recursive: true });
+      atomic(file, JSON.stringify(messages));
+      roomVersions.set(file, (roomVersions.get(file) ?? 0) + 1);
+      publish();
+    },
+    async exportRoom(path) {
+      const messages = readRoom(checkedRoom(path));
+      const result = await dialog.showSaveDialog(window, { defaultPath: basename(path) + "-聊天室.md", filters: [{ name: "Markdown", extensions: ["md"] }] });
+      if (!result.canceled && result.filePath) writeFileSync(result.filePath, "# " + basename(path) + " · 聊天室\n\n" + roomTranscript(messages) + "\n");
+    },
     async memberPicker() { openPicker(); },
     async setPetsEnabled(enabled) {
       if (typeof enabled !== "boolean") throw new Error("桌宠设置无效");
@@ -533,7 +564,9 @@ function memberApi(owner: MemberWindow): Omit<Api, "subscribe" | "members" | "op
     async state() { return snapshot(record); },
     async folder() {
       const result = await dialog.showOpenDialog(window, { properties: ["openDirectory"], title: "选择项目文件夹", defaultPath: record.cwd });
-      return result.canceled ? undefined : result.filePaths[0];
+      if (result.canceled) return undefined;
+      owner.pickedWorkspace = realpathSync(result.filePaths[0]);
+      return owner.pickedWorkspace;
     },
     async create(path, text, approvalMode = "request") {
       validatePrompt(text);
@@ -834,7 +867,7 @@ function registerApi() {
     openMember,
   };
   const channels: Array<keyof Omit<Api, "subscribe" | "watchState" | "ackState">> = [
-    "members", "openMember", "memberPicker", "state", "folder", "create", "importSession",
+    "members", "openMember", "memberPicker", "state", "folder", "create", "importSession", "room", "postRoom", "exportRoom",
     "select", "setAccess", "setApprovalMode", "command", "retry", "peers", "importProfile", "saveProfile", "artifact", "confirm", "setPetsEnabled",
   ];
   for (const name of channels) ipcMain.handle("teamhub:" + name, async (event, ...args) => {

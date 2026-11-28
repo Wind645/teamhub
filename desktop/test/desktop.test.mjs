@@ -328,6 +328,66 @@ async function settled(page, status = "completed") {
   await expect.poll(async () => (await current(page))?.events.findLast(e => e.type === "status")?.data, { timeout: 15_000 }).toBe(status);
 }
 
+test("workspace room shares Markdown and quotes selected messages into AI drafts", async () => {
+  const data = await appData();
+  const project = join(data, "project");
+  await mkdir(project);
+  const { app, page } = await launch(data, [project, project]);
+  try {
+    const bob = await createMember(app, await menuPicker(app), "bob");
+    for (const member of [page, bob]) {
+      await newSession(member);
+      await member.getByRole("button", { name: "引用工作区聊天记录" }).click();
+    }
+    const input = page.getByRole("textbox", { name: "聊天室消息" });
+    await input.fill("**周五发布**");
+    await input.press("End");
+    await input.press("Enter");
+    await expect(input).toHaveValue("**周五发布**\n");
+    await page.keyboard.insertText("请确认");
+    await input.press("Control+Enter");
+    await expect(bob.locator(".room-list .markdown p")).toHaveText("周五发布\n请确认", { useInnerText: true });
+    await expect(bob.locator(".room-list strong").last()).toHaveText("周五发布");
+    await expect(bob.getByText("批量选择请按shift")).toBeVisible();
+    await input.fill("第二条");
+    await input.press("Control+Enter");
+    const first = bob.locator(".room-list .markdown").first();
+    const second = bob.getByText("第二条", { exact: true });
+    const selected = bob.locator(".room-list input:checked");
+    await bob.keyboard.down("Shift");
+    await first.click();
+    await expect(selected).toHaveCount(1);
+    await second.click();
+    await expect(selected).toHaveCount(2);
+    await bob.keyboard.up("Shift");
+    await first.click();
+    await second.click({ modifiers: ["Shift"] });
+    await expect(selected).toHaveCount(0);
+    await first.click({ modifiers: ["Shift"] });
+    await expect(selected).toHaveCount(1);
+    const output = join(data, "export.md");
+    await app.evaluate(({ dialog }, filePath) => {
+      dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+    }, output);
+    await bob.getByRole("button", { name: "导出 Markdown" }).click();
+    await expect.poll(() => readFile(output, "utf8").catch(() => "")).toContain("**周五发布**");
+    await bob.getByRole("button", { name: "新建对话问 AI" }).click();
+    await expect(task(bob)).toHaveValue("");
+    await expect(bob.locator(".citation")).toContainText("周五发布");
+    await task(bob).fill("谁来跟进？");
+    await bob.getByRole("button", { name: "移除 tester 的引用" }).click();
+    await expect(bob.locator(".citation")).toHaveCount(0);
+    await expect(task(bob)).toHaveValue("谁来跟进？");
+    await expect(page.locator(".room-avatar")).toHaveText("T");
+    await page.getByRole("checkbox", { name: "选择 tester 的消息" }).first().check();
+    await page.getByRole("button", { name: "引用到当前对话" }).click();
+    await expect(task(page)).toHaveValue("");
+    await expect(page.locator(".citation")).toContainText("周五发布");
+    await submit(page, "总结发布时间");
+    await expect.poll(async () => (await current(page))?.events.find(e => e.type === "user")?.data).toMatch(/总结发布时间[\s\S]*周五发布/);
+  } finally { await app.close(); }
+});
+
 test("conversation sharing enforces live owner-only access changes", { timeout: 65000 }, async () => {
   const data = await appData();
   const project = join(data, "shared project");

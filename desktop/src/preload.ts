@@ -7,6 +7,9 @@ const invoke = async (name: string, ...args: unknown[]) => {
   return reply.value;
 };
 const api: Api = {
+  room: path => invoke("room", path),
+  postRoom: (path, text) => invoke("postRoom", path, text),
+  exportRoom: path => invoke("exportRoom", path),
   members: () => invoke("members"),
   openMember: peer => invoke("openMember", peer),
   memberPicker: () => invoke("memberPicker"),

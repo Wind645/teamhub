@@ -5,6 +5,8 @@ import { createRoot } from "react-dom/client";
 import { ArrowUp, Check, ChevronDown, CircleAlert, Clock, FileText, Folder, FolderOpen, Hand, History, LoaderCircle, Menu, Plus, RotateCcw, Settings, ShieldAlert, ShieldCheck, Square, Terminal, Users, X } from "lucide-react";
 import Markdown from "react-markdown";
 import gfm from "remark-gfm";
+import { Download, MessagesSquare, Quote } from "lucide-react";
+import { roomTranscript, type RoomMessage } from "../src/protocol";
 import { accessModes, type AccessMode, approvalModes, type Api, type ApprovalMode, type Command, type Issue, type LocalMember, type Member, type Pending, type Profile, type SessionState, type Snapshot } from "../src/protocol";
 import type { Event } from "../../toy-harness/src/journal";
 import "./style.css";
@@ -285,9 +287,103 @@ function PeerPanel({ member, close }: { member: Member; close: () => void }) {
   </aside>;
 }
 
+function MemberAvatar({ peer }: { peer: string }) {
+  let hash = 0;
+  for (const char of peer) hash = (Math.imul(hash, 31) + char.codePointAt(0)!) >>> 0;
+  return <span className="room-avatar" aria-hidden="true" style={{ backgroundColor: `hsl(${hash % 360} 38% 37%)` }}>
+    {Array.from(peer.trim())[0]?.toUpperCase()}
+  </span>;
+}
+function WorkspaceRoom({ path, version, close, cite, ask }: {
+  path: string; version: number; close: () => void; cite?: (messages: RoomMessage[]) => void; ask: (messages: RoomMessage[]) => void;
+}) {
+  const [messages, setMessages] = useState<RoomMessage[]>();
+  const [selected, setSelected] = useState<string[]>([]);
+  const anchor = useRef<{ id: string; checked: boolean } | null>(null);
+  const press = useRef<{ x: number; y: number } | null>(null);
+  function toggle(index: number, extend: boolean) {
+    if (!messages) return;
+    const id = messages[index].id;
+    const start = extend && selected.length && anchor.current?.id !== id
+      ? messages.findIndex(m => m.id === anchor.current?.id) : -1;
+    const checked = start >= 0 ? anchor.current!.checked : !selected.includes(id);
+    if (start < 0) anchor.current = { id, checked };
+    const from = start < 0 ? index : Math.min(start, index);
+    const ids = messages.slice(from, Math.max(index, start) + 1).map(m => m.id);
+    setSelected(prev => {
+      const next = new Set(prev);
+      for (const key of ids) { if (checked) next.add(key); else next.delete(key); }
+      return [...next];
+    });
+  }
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const list = useRef<HTMLDivElement>(null);
+  const pinned = useRef(true);
+  useEffect(() => {
+    let active = true;
+    api.room(path).then(rows => { if (active) setMessages(rows); }).catch(e => {
+      if (active) { setMessages(undefined); setError(String(e)); }
+    });
+    return () => { active = false; };
+  }, [path, version]);
+  useLayoutEffect(() => {
+    if (list.current && pinned.current) list.current.scrollTop = list.current.scrollHeight;
+  }, [messages]);
+  const chosen = messages?.filter(m => selected.includes(m.id)) ?? [];
+  async function post() {
+    if (busy || !input.trim()) return;
+    setBusy(true);
+    setError("");
+    try { await api.postRoom(path, input); setInput(""); pinned.current = true; }
+    catch (e) { setError(String(e)); }
+    finally { setBusy(false); }
+  }
+  return <section className="session-layout" aria-label="工作区聊天室"><div className="session-main">
+      <div className="room-toolbar room-heading"><IconButton label="返回对话" click={close}><ChevronDown size={16} style={{ transform: "rotate(90deg)" }}/></IconButton><strong>聊天室</strong><span>{messages ? messages.length + " 条消息" : "正在读取…"}</span>
+        <small title="按住 Shift 点击起点和终点，可整段选择"><span aria-hidden="true" style={{ marginRight: 4 }}>💡</span>批量选择请按shift</small>
+        <button disabled={!messages?.length} onClick={() => void api.exportRoom(path).catch(e => setError(String(e)))}><Download size={15}/>导出 Markdown</button></div>
+      <div className="room-list timeline-scroll" ref={list} onScroll={e => { const el = e.currentTarget; pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
+        <div className="timeline">{messages?.length === 0 && <p>还没有消息，来聊聊这个工作区吧。</p>}
+        {messages?.map((m, index) => {
+          const previous = messages[index - 1];
+          const gap = previous ? Date.parse(m.at) - Date.parse(previous.at) : Infinity;
+          const continued = previous?.peer === m.peer && gap >= 0 && gap < 5 * 60_000;
+          return <article key={m.id} className={continued ? "room-continuation" : undefined}
+            onPointerDown={e => { press.current = { x: e.clientX, y: e.clientY }; }}
+            onMouseDown={e => { if (e.shiftKey && e.button === 0) e.preventDefault(); }}
+            onClick={e => {
+              if ((e.target as Element).closest("input, button, a")) return;
+              const start = press.current;
+              if (!start || Math.hypot(e.clientX - start.x, e.clientY - start.y) > 4) return;
+              if (!e.shiftKey && window.getSelection()?.isCollapsed === false) return;
+              toggle(index, e.shiftKey);
+            }}>
+          <input aria-label={"选择 " + m.peer + " 的消息"} title="按住 Shift 点击可选择或取消整段" type="checkbox" checked={selected.includes(m.id)}
+            onClick={e => toggle(index, e.shiftKey)} readOnly/>
+          {!continued && <MemberAvatar peer={m.peer}/>}
+          <div>{!continued && <><strong>{m.peer}</strong> <time dateTime={m.at}>{new Date(m.at).toLocaleString("zh-CN")}</time></>}
+            <RichText text={m.text}/></div></article>;
+        })}</div>
+      </div>
+      <div className="composer-area"><div className="composer">{chosen.length > 0 && <div className="room-toolbar"><span>已选 {chosen.length} 条</span>
+        {cite && <button onClick={() => cite(chosen)}>引用到当前对话</button>}
+        <button onClick={() => ask(chosen)}>新建对话问 AI</button></div>}
+      {error && <p role="alert">{error}</p>}
+      <textarea aria-label="聊天室消息" placeholder="写消息，支持 Markdown…" maxLength={20000} readOnly={busy} value={input}
+        onChange={e => setInput(e.target.value)} onKeyDown={e => {
+          if (e.key === "Enter" && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && !e.nativeEvent.isComposing && e.keyCode !== 229) { e.preventDefault(); void post(); }
+        }}/>
+      <div className="composer-controls"><div className="actions"><button className="primary" disabled={busy || !input.trim()} onClick={() => void post()}><ArrowUp size={15}/>发送消息</button></div></div>
+    </div></div></div></section>;
+}
+
 function App() {
+  const [roomPath, setRoomPath] = useState<string>();
   const [snapshot, setSnapshot] = useState<Snapshot>();
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [citations, setCitations] = useState<Record<string, RoomMessage[]>>({});
   const [modal, setModal] = useState<"settings" | "checkpoints">();
   const [nav, setNav] = useState(false);
   const [peers, setPeers] = useState(false);
@@ -333,6 +429,8 @@ function App() {
   const resumable = ["paused", "failed", "interrupted"].includes(phase.key);
   const draftKey = id ?? "";
   const draft = drafts[draftKey] ?? "";
+  const attached = citations[draftKey] ?? [];
+  const canSend = Boolean(draft.trim() || attached.length);
   const cwd = member?.cwd ?? newChat?.path;
   const approvalMode = member ? member.approvalMode ?? "request" : draftApprovalMode;
   const report = (error: unknown) => setErrors(previous => ({ ...previous, [id ?? ""]: error instanceof Error ? error.message : String(error) }));
@@ -349,10 +447,12 @@ function App() {
     void api.select(next).then(closeDraft).catch(report);
   };
   const closeDraft = () => {
+    setRoomPath(undefined);
     setNewChat(undefined);
     setDraftApprovalMode("request");
     setNewIssue(undefined);
     setDrafts(previous => ({ ...previous, "": "" }));
+    setCitations(previous => ({ ...previous, "": [] }));
     setErrors(previous => ({ ...previous, "": "" }));
   };
   const openDraft = (path?: string) => {
@@ -363,14 +463,16 @@ function App() {
     setModal(undefined);
   };
   const submit = async () => {
-    if (readOnly || !draft.trim() || savingApproval) return;
+    if (readOnly || !canSend || savingApproval) return;
+    const text = attached.length ? [draft.trim(), "引用的工作区聊天记录", roomTranscript(attached)
+      .split("\n").map(line => "> " + line).join("\n")].filter(Boolean).join("\n\n") : draft.trim();
     if (!id) {
       if (!cwd || creating) return;
       setCreating(true);
       setNewIssue(undefined);
       setErrors(previous => ({ ...previous, "": "" }));
       try {
-        const result = await api.create(cwd, draft.trim(), approvalMode);
+        const result = await api.create(cwd, text, approvalMode);
         if ("issue" in result) setNewIssue(result.issue);
         else {
           setSnapshot(await api.state());
@@ -384,7 +486,8 @@ function App() {
     setErrors(previous => ({ ...previous, [id]: "" }));
     setSending(id);
     try {
-      await send({ type: running ? "steer" : "submit", text: draft.trim() });
+      await send({ type: running ? "steer" : "submit", text });
+      setCitations(prev => ({ ...prev, [id]: (prev[id] ?? []).filter(m => !attached.includes(m)) }));
       setDrafts(previous => previous[id] === draft ? { ...previous, [id]: "" } : previous);
     } catch (error) { report(error); }
     finally { setSending(previous => previous === id ? undefined : previous); }
@@ -409,7 +512,7 @@ function App() {
     } else if (positions.current[id]?.pinned !== false) {
       element.scrollTop = element.scrollHeight;
     }
-  }, [id, state?.events.length, state?.pending?.request, activityText]);
+  }, [roomPath, id, state?.events.length, state?.pending?.request, activityText]);
   useEffect(() => {
     composing.current = false;
     if (newChat?.path) composer.current?.focus();
@@ -418,7 +521,8 @@ function App() {
   if (!snapshot) return <main className="loading">{errors[""] || "正在打开 TeamHub…"}</main>;
   const currentIssue = state?.issue ?? newIssue ?? (errors[draftKey] ? { kind: "session" as const, detail: errors[draftKey] } : undefined);
   const mode = snapshot.profile.mode === "offline" ? "离线体验" : snapshot.profile.config.model?.name;
-  const workspaceGroups = [...new Set(groups.map(group => group.members[0].cwd))];
+  const workspaceGroups = [...new Set([...groups.map(group => group.members[0].cwd), ...(newChat?.path ? [newChat.path] : [])])];
+  const showingRoom = Boolean(roomPath && workspaceGroups.includes(roomPath));
 
   return <div className="app">
     {nav && <button className="nav-backdrop" aria-label="关闭导航" onClick={() => setNav(false)} />}
@@ -433,11 +537,12 @@ function App() {
               <Plus size={14} />
             </IconButton>
           </div>
+          <button aria-current={roomPath === path ? "page" : undefined} className="session-button room-entry" disabled={creating} onClick={() => { setRoomPath(path); setNav(false); }}><MessagesSquare size={15}/>聊天室</button>
           {groups.filter(group => group.members[0].cwd === path).map(item => {
             const first = activeEvents(snapshot.sessions[item.members[0].id]?.events ?? []).find(event => event.type === "user");
             const label = String(first?.data ?? "新对话");
             return <div className="conversation" key={item.members[0].id}>
-              {item.members.map(current => <button key={current.id} disabled={creating} aria-current={id === current.id ? "page" : undefined}
+              {item.members.map(current => <button key={current.id} disabled={creating} aria-current={!showingRoom && id === current.id ? "page" : undefined}
                 className="session-button" onClick={() => choose(current.id)}>
                 <span title={label}>{current.peer !== snapshot.peer && `${current.peer} · `}{label}</span>
                 <Status state={snapshot.sessions[current.id]} />
@@ -458,20 +563,34 @@ function App() {
         <div className="mobile-nav"><IconButton label="会话导航" click={() => setNav(value => !value)}><Menu size={20} /></IconButton></div>
         <div className="topbar-title">
           <strong title={snapshot.peer}>{snapshot.peer}</strong>
-          {cwd && <code title={cwd}>{cwd}</code>}
+          {(showingRoom || cwd) && <code title={showingRoom ? roomPath : cwd}>{showingRoom ? roomPath : cwd}</code>}
         </div>
-        {member && (shared ? <span>{member.peer} · {readOnly ? "只读" : "可编辑"}</span> :
+        {!showingRoom && member && (shared ? <span>{member.peer} · {readOnly ? "只读" : "可编辑"}</span> :
           <span className="access-picker"><select aria-label="对话访问权限" title="对话访问权限" value={member.access ?? "private"}
             onChange={event => void api.setAccess(member.id, event.target.value as AccessMode).catch(report)}>
             {accessModes.map(mode => <option key={mode} value={mode}>{accessLabels[mode]}</option>)}
           </select><ChevronDown size={13} aria-hidden="true" /></span>)}
-        {!shared && <span className="model-label" title={mode}>{mode}</span>}
-        {!shared && member?.peer && <IconButton label="协作状态" click={() => setPeers(value => !value)} pressed={peers}><Users size={18} /></IconButton>}
-        {member && !readOnly && <IconButton label="检查点" click={() => setModal("checkpoints")}><History size={19} /></IconButton>}
+        {!showingRoom && !shared && <span className="model-label" title={mode}>{mode}</span>}
+        {!showingRoom && !shared && member?.peer && <IconButton label="协作状态" click={() => setPeers(value => !value)} pressed={peers}><Users size={18} /></IconButton>}
+        {!showingRoom && member && !readOnly && <IconButton label="检查点" click={() => setModal("checkpoints")}><History size={19} /></IconButton>}
         <IconButton label="新建成员窗口" click={() => void api.memberPicker().catch(report)}><Plus size={18} /></IconButton>
         <IconButton label="模型设置" click={() => setModal("settings")}><Settings size={18} /></IconButton>
       </header>
-      {!cwd ? <>
+      {showingRoom && roomPath ? <WorkspaceRoom key={roomPath}
+      path={roomPath} version={snapshot.roomVersions?.[roomPath] ?? 0} close={() => setRoomPath(undefined)}
+      cite={cwd === roomPath && !readOnly ? messages => {
+        setCitations(prev => {
+          const current = prev[draftKey] ?? [];
+          return { ...prev, [draftKey]: [...current, ...messages.filter(m => !current.some(c => c.id === m.id))] };
+        });
+        setRoomPath(undefined);
+        requestAnimationFrame(() => composer.current?.focus());
+      } : undefined}
+      ask={messages => {
+        openDraft(roomPath);
+        setCitations(prev => ({ ...prev, "": messages }));
+        setRoomPath(undefined);
+      }}/> : !cwd ? <>
         {currentIssue && <div className="issue-wrap"><IssueBox issue={currentIssue} settings={() => setModal("settings")} /></div>}
         <NewConversation key={newChat ? "new" : "initial"} open={openDraft} profile={snapshot.profile} report={report} />
       </> : <div className="session-layout">
@@ -524,6 +643,13 @@ function App() {
           </div>
           {!readOnly && <div className="composer-area">
             <div className="composer">
+              {attached.length > 0 && <div className="citation-list" aria-label="引用的聊天消息">
+                {attached.map(m => <div className="citation" key={m.id}>
+                  <Quote size={14} aria-hidden="true"/><strong>{m.peer}</strong><span title={m.text}>{m.text}</span>
+                  <IconButton label={`移除 ${m.peer} 的引用`} disabled={creating} click={() => setCitations(prev =>
+                    ({ ...prev, [draftKey]: prev[draftKey].filter(item => item.id !== m.id) }))}><X size={14}/></IconButton>
+                </div>)}
+              </div>}
               <textarea ref={composer} aria-label="任务" placeholder={running ? "输入要追加的指令" : "输入任务…"} value={draft}
                 readOnly={creating} onChange={event => setDrafts(previous => ({ ...previous, [draftKey]: event.target.value }))}
                 onCompositionStart={() => { composing.current = true; }}
@@ -535,6 +661,7 @@ function App() {
                 }} />
               <div className="composer-controls">
                 <div className="composer-context">
+                  <IconButton label="引用工作区聊天记录" disabled={creating} click={() => setRoomPath(cwd)}><Quote size={15}/></IconButton>
                   <ApprovalPicker key={id ?? "draft"} mode={approvalMode} disabled={creating || savingApproval} running={running}
                     select={next => void selectApprovalMode(next)} />
                   <Status state={creating ? { phase: "starting", events: [] } : state} />
@@ -542,7 +669,7 @@ function App() {
                 <div className="actions">
                   {resumable && <button disabled={savingApproval} onClick={() => void send({ type: "resume" }).catch(report)}><RotateCcw size={14} />继续此回合</button>}
                   {running && <button onClick={() => void send({ type: "interrupt" }).catch(report)}><Square size={13} />中断</button>}
-                  <button className="primary" disabled={!draft.trim() || creating || savingApproval || Boolean(id && (sending === id || state?.phase !== "ready"))} onClick={() => void submit()}>
+                  <button className="primary" disabled={!canSend || creating || savingApproval || Boolean(id && (sending === id || state?.phase !== "ready"))} onClick={() => void submit()}>
                     <ArrowUp size={16} />{running ? "追加指令" : "发送"}</button>
                 </div>
               </div>
@@ -552,6 +679,7 @@ function App() {
         {peers && !shared && member?.peer && <PeerPanel member={member} close={() => setPeers(false)} />}
       </div>}
     </main>
+
     {modal === "settings" && <ModelSettings snapshot={snapshot} close={() => setModal(undefined)} report={error => {
       report(error);
       setModal(undefined);

@@ -1,3 +1,21 @@
+.room-heading { padding: 8px 18px; border-bottom: 1px solid var(--line); }
+.room-list article { display: grid; grid-template-columns: 30px minmax(0,1fr) 16px; gap: 10px; padding: 9px 8px; align-items: start; overflow-wrap: anywhere; border-radius: 5px; }
+.room-list article > .room-avatar { grid-area: 1 / 1; }
+.room-list article > div { grid-area: 1 / 2; }
+.room-list article > input { grid-area: 1 / 3; }
+.room-list article:is(:hover, :focus-within) { background: var(--hover); box-shadow: inset 0 0 0 1px var(--line); }
+.room-list article:has(> input:checked) { background: var(--selected); box-shadow: inset 0 0 0 1px var(--accent); }
+.room-avatar { display: grid; place-items: center; height: 30px; border-radius: 50%; color: white; font-size: 14px; font-weight: 600; }
+.citation-list { display: flex; flex-wrap: wrap; gap: 5px; max-height: 14vh; overflow: auto; margin: 0 4px 6px; }
+.citation { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 2px 3px 2px 8px; border-left: 2px solid var(--accent); background: var(--selected); border-radius: 4px; font-size: 12px; }
+.citation span, .citation strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 32ch; }
+.citation .icon-button { flex: none; width: 24px; height: 24px; min-height: 24px; }
+.room-list input[type="checkbox"] { width: 16px; height: 16px; margin: 3px 0 0; }
+.room-list time, .room-toolbar span { font-size: 12px; opacity: .74; }
+.room-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.room-toolbar span { margin-right: auto; }
+.session-button.room-entry { justify-content: flex-start; gap: 8px; }
+.room-list + .composer-area .composer-controls { justify-content: flex-end; }
 /* Segoe UI 13/15/28, 8px spacing rhythm, ivory workspace and sand sidebar (espresso after dark). */
 :root {
   color-scheme: light dark;
@@ -64,13 +82,13 @@ pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto;
 .new-button { justify-content: flex-start; width: 100%; font-weight: 600; }
 .workspace-list { overflow: auto; flex: 1; padding: 16px 0; min-height: 0; }
 .workspace-heading { display: flex; align-items: center; justify-content: space-between; gap: 4px; padding: 2px 4px 1px 8px; color: var(--muted); }
-.workspace h2 { display: flex; gap: 8px; align-items: center; min-width: 0; font-size: 12px; margin: 0; font-weight: 600; }
+.workspace h2 { display: flex; gap: 8px; align-items: center; min-width: 0; font-size: 15px; color: var(--text); margin: 0; font-weight: 600; }
 .workspace h2 svg { flex: none; }
 .workspace-heading .icon-button { flex: none; width: 24px; height: 24px; min-height: 24px; }
 .workspace h2 span, .session-button > span:first-child, .conversation-title { text-overflow: ellipsis; overflow: hidden; white-space: nowrap; min-width: 0; }
-.conversation { margin: 0 0 4px; }
+.conversation { margin: 0 0 1px; }
 .conversation-title { color: var(--muted); font-size: 12px; margin: 9px 8px 3px; }
-.session-button { width: 100%; padding: 5px 8px; justify-content: space-between; border-color: transparent; background: transparent; gap: 5px; }
+.session-button { width: 100%; min-height: 28px; padding: 3px 8px 3px 18px; font-size: 12px; justify-content: space-between; border-color: transparent; background: transparent; gap: 5px; }
 .session-button[aria-current="page"] { background: var(--selected); font-weight: 600; }
 .status { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); flex: none; font-size: 12px; white-space: nowrap; }
 .status i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
@@ -242,3 +260,6 @@ dialog header { margin-bottom: 12px; }
   .timeline { padding: 16px 14px; gap: 9px; }
   .composer-area { padding: 0 14px 12px; }
 }
+.room-list .timeline { gap: 0; }
+.room-list article.room-continuation { padding-top: 0; }
+.room-list .markdown p { white-space: pre-line; }
