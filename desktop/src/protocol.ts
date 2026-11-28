@@ -13,7 +13,10 @@ export type Profile = {
 export type Conversation = {
   id: string; created: number; members: Member[];
 };
+export const accessModes = ["private", "view", "edit"] as const;
+export type AccessMode = typeof accessModes[number];
 export type Member = {
+  access?: AccessMode;
   id: string; cwd: string; peer?: Peer; directory?: string; approvalMode?: ApprovalMode;
 };
 export type ApprovalKey = { turn: string; request: number; callId: string };
@@ -57,6 +60,7 @@ export type Api = {
   create(path: string, text: string, approvalMode?: ApprovalMode): Promise<{ id: string } | { issue: Issue }>;
   importSession(): Promise<string | undefined>;
   select(id?: string): Promise<void>;
+  setAccess(id: string, mode: AccessMode): Promise<void>;
   setApprovalMode(id: string, mode: ApprovalMode): Promise<void>;
   command(id: string, command: Command): Promise<unknown>;
   retry(id: string): Promise<void>;

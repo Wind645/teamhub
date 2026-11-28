@@ -5,7 +5,7 @@ import { createRoot } from "react-dom/client";
 import { ArrowUp, Check, ChevronDown, CircleAlert, Clock, FileText, Folder, FolderOpen, Hand, History, LoaderCircle, Menu, Plus, RotateCcw, Settings, ShieldAlert, ShieldCheck, Square, Terminal, Users, X } from "lucide-react";
 import Markdown from "react-markdown";
 import gfm from "remark-gfm";
-import { approvalModes, type Api, type ApprovalMode, type Command, type Issue, type LocalMember, type Member, type Pending, type Profile, type SessionState, type Snapshot } from "../src/protocol";
+import { accessModes, type AccessMode, approvalModes, type Api, type ApprovalMode, type Command, type Issue, type LocalMember, type Member, type Pending, type Profile, type SessionState, type Snapshot } from "../src/protocol";
 import type { Event } from "../../toy-harness/src/journal";
 import "./style.css";
 import { HistoryWindow, toolIndex } from "./history-performance";
@@ -14,6 +14,7 @@ declare global { interface Window { teamhub: Api } }
 const api = window.teamhub;
 const name = (member?: Member) => member?.peer ?? "助手";
 const base = (path: string) => path.replace(/[\\/]+$/, "").split(/[\\/]/).at(-1) || path;
+const accessLabels = { private: "私有", view: "他人可观看", edit: "他人可编辑" };
 const phases: Record<string, string> = { running: "运行中", completed: "已完成", interrupted: "已中断", failed: "失败", paused: "已暂停", idle: "就绪" };
 const issueNames = { credential: "缺少模型密钥", model: "模型连接失败", hub: "Hub 离线", session: "会话不可用" };
 const approvalOptions = {
@@ -81,8 +82,8 @@ function IssueBox({ issue, settings, retry }: { issue: Issue; settings: () => vo
   </section>;
 }
 
-function ToolRow({ event, events, pending, member, act, report }: {
-  event: Event; events: Event[]; pending?: Pending; member: Member;
+function ToolRow({ event, events, pending, member, act, report, shared, readOnly }: {
+  event: Event; events: Event[]; pending?: Pending; member: Member; shared: boolean; readOnly: boolean;
   act: (request: Pending, allow: boolean) => Promise<unknown>; report: (error: unknown) => void;
 }) {
   const { request, call } = event.data as { request: number; call: { name: string; id: string; args?: Record<string, unknown> } };
@@ -116,13 +117,13 @@ function ToolRow({ event, events, pending, member, act, report }: {
         {result?.value !== undefined && <Disclosure label="工具输出" text={stringify(result.value)} />}
       </div>}
     </details>
-    {approval && <section className="approval" aria-label="工具审批">
+    {!readOnly && approval && <section className="approval" aria-label="工具审批">
       <div className="approval-title"><CircleAlert size={16} /><strong>允许此工具调用？</strong></div>
       <pre>{detail}</pre>
       <div className="actions"><button disabled={answered} onClick={() => handle(false)}>拒绝</button>
         <button className="primary" disabled={answered} onClick={() => handle(true)}><Check size={16} />允许一次</button></div>
     </section>}
-    {result?.artifact && resultEvent && <div className="artifact">
+    {!shared && result?.artifact && resultEvent && <div className="artifact">
       <FileText size={15} /><button title={result.artifact} onClick={() => void api.artifact(member.id, resultEvent.seq, "open").catch(report)}>{result.artifact}</button>
       <IconButton label="在文件夹中定位" click={() => void api.artifact(member.id, resultEvent.seq, "show").catch(report)}><FolderOpen size={15} /></IconButton>
     </div>}
@@ -310,6 +311,8 @@ function App() {
   const groups = snapshot?.conversations ?? [];
   const group = groups.find(group => group.members.some(member => member.id === id));
   const member = group?.members.find(member => member.id === id);
+  const shared = Boolean(member && member.peer !== snapshot?.peer);
+  const readOnly = shared && member?.access !== "edit";
   const state = id ? snapshot?.sessions[id] : undefined;
   const events = activeEvents(state?.events ?? []);
   const phase = status(state, events);
@@ -360,7 +363,7 @@ function App() {
     setModal(undefined);
   };
   const submit = async () => {
-    if (!draft.trim() || savingApproval) return;
+    if (readOnly || !draft.trim() || savingApproval) return;
     if (!id) {
       if (!cwd || creating) return;
       setCreating(true);
@@ -433,10 +436,10 @@ function App() {
           {groups.filter(group => group.members[0].cwd === path).map(item => {
             const first = activeEvents(snapshot.sessions[item.members[0].id]?.events ?? []).find(event => event.type === "user");
             const label = String(first?.data ?? "新对话");
-            return <div className="conversation" key={item.id}>
+            return <div className="conversation" key={item.members[0].id}>
               {item.members.map(current => <button key={current.id} disabled={creating} aria-current={id === current.id ? "page" : undefined}
                 className="session-button" onClick={() => choose(current.id)}>
-                <span title={label}>{label}</span>
+                <span title={label}>{current.peer !== snapshot.peer && `${current.peer} · `}{label}</span>
                 <Status state={snapshot.sessions[current.id]} />
               </button>)}
             </div>;
@@ -457,9 +460,14 @@ function App() {
           <strong title={snapshot.peer}>{snapshot.peer}</strong>
           {cwd && <code title={cwd}>{cwd}</code>}
         </div>
-        <span className="model-label" title={mode}>{mode}</span>
-        {member?.peer && <IconButton label="协作状态" click={() => setPeers(value => !value)} pressed={peers}><Users size={18} /></IconButton>}
-        {member && <IconButton label="检查点" click={() => setModal("checkpoints")}><History size={19} /></IconButton>}
+        {member && (shared ? <span>{member.peer} · {readOnly ? "只读" : "可编辑"}</span> :
+          <span className="access-picker"><select aria-label="对话访问权限" title="对话访问权限" value={member.access ?? "private"}
+            onChange={event => void api.setAccess(member.id, event.target.value as AccessMode).catch(report)}>
+            {accessModes.map(mode => <option key={mode} value={mode}>{accessLabels[mode]}</option>)}
+          </select><ChevronDown size={13} aria-hidden="true" /></span>)}
+        {!shared && <span className="model-label" title={mode}>{mode}</span>}
+        {!shared && member?.peer && <IconButton label="协作状态" click={() => setPeers(value => !value)} pressed={peers}><Users size={18} /></IconButton>}
+        {member && !readOnly && <IconButton label="检查点" click={() => setModal("checkpoints")}><History size={19} /></IconButton>}
         <IconButton label="新建成员窗口" click={() => void api.memberPicker().catch(report)}><Plus size={18} /></IconButton>
         <IconButton label="模型设置" click={() => setModal("settings")}><Settings size={18} /></IconButton>
       </header>
@@ -496,7 +504,7 @@ function App() {
                 if (event.type === "user" || event.type === "steer") return <article className="user-message" key={event.seq}>
                   {event.type === "steer" && <strong>追加指令 · 已排队</strong>}<p>{String(event.data)}</p></article>;
                 if (event.type === "request") return <div key={event.seq} id={"approval-" + (event.data as { request: number }).request}>
-                  <ToolRow event={event} events={events} pending={state?.pending} member={member} report={report}
+                  <ToolRow shared={shared} readOnly={readOnly} event={event} events={events} pending={state?.pending} member={member} report={report}
                     act={(key, allow) => send({ type: "approve", key, allow })} /></div>;
                 if (event.type === "notice") return <p className="notice" key={event.seq}>{friendly(String(event.data))}</p>;
                 if (event.type === "uncertain") return <p className="notice attention" key={event.seq}>待核实 · 先前调用可能已产生副作用</p>;
@@ -504,7 +512,7 @@ function App() {
                 return null;
               }}</HistoryWindow>}
               {currentIssue && <IssueBox issue={currentIssue} settings={() => setModal("settings")}
-                retry={id && (currentIssue.kind === "hub" || currentIssue.kind === "session") ? () => void api.retry(id).then(() => setErrors(previous => ({ ...previous, [id]: "" }))).catch(report) : undefined} />}
+                retry={!readOnly && id && (currentIssue.kind === "hub" || currentIssue.kind === "session") ? () => void api.retry(id).then(() => setErrors(previous => ({ ...previous, [id]: "" }))).catch(report) : undefined} />}
               {member && <div className="timeline-activity" role="status">
                 {activityText && <>
                   {waitingForApproval ? <Clock size={15} aria-hidden="true" /> :
@@ -514,7 +522,7 @@ function App() {
               </div>}
             </div>
           </div>
-          <div className="composer-area">
+          {!readOnly && <div className="composer-area">
             <div className="composer">
               <textarea ref={composer} aria-label="任务" placeholder={running ? "输入要追加的指令" : "输入任务…"} value={draft}
                 readOnly={creating} onChange={event => setDrafts(previous => ({ ...previous, [draftKey]: event.target.value }))}
@@ -539,16 +547,16 @@ function App() {
                 </div>
               </div>
             </div>
-          </div>
+          </div>}
         </div>
-        {peers && member?.peer && <PeerPanel member={member} close={() => setPeers(false)} />}
+        {peers && !shared && member?.peer && <PeerPanel member={member} close={() => setPeers(false)} />}
       </div>}
     </main>
     {modal === "settings" && <ModelSettings snapshot={snapshot} close={() => setModal(undefined)} report={error => {
       report(error);
       setModal(undefined);
     }} />}
-    {modal === "checkpoints" && member && <Modal title="检查点" close={() => setModal(undefined)}>
+    {modal === "checkpoints" && !readOnly && member && <Modal title="检查点" close={() => setModal(undefined)}>
       <div className="checkpoints"><p>仅恢复对话历史，已修改的文件会保留。</p>
         {events.filter(event => event.type === "session" || event.type === "status" && event.data !== "running").toReversed().map(event => {
           const count = events.filter(item => item.seq > event.seq && ["user", "steer", "final", "request"].includes(item.type)).length;

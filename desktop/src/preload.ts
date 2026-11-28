@@ -24,6 +24,7 @@ const api: Api = {
   create: (path, text, approvalMode) => invoke("create", path, text, approvalMode),
   importSession: () => invoke("importSession"),
   select: id => invoke("select", id),
+  setAccess: (id, mode) => invoke("setAccess", id, mode),
   setApprovalMode: (id, mode) => invoke("setApprovalMode", id, mode),
   command: (id, command) => invoke("command", id, command),
   retry: id => invoke("retry", id),

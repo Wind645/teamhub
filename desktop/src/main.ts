@@ -6,7 +6,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import type { Event } from "../../toy-harness/src/journal.js";
 import schoolPreset from "../../toy-harness/examples/sustech.deepseek.json";
 import type { ModelConfig } from "../../toy-harness/src/model.js";
-import { approvalModes, type Api, type ApprovalMode, type Command, type Conversation, type Issue, type Member, type Peer, type Profile, type SessionState, type Snapshot, type WorkerMessage, type WorkerRequest } from "./protocol.js";
+import { accessModes, approvalModes, type Api, type ApprovalMode, type Command, type Conversation, type Issue, type Member, type Peer, type Profile, type SessionState, type Snapshot, type WorkerMessage, type WorkerRequest } from "./protocol.js";
 import { initialProfile, migrateIndex, peerId, type MemberIndex, type MemberRecord } from "./members.js";
 import { memberPet, PetActivity, type PetPreferences } from "./pet-state.js";
 import { PetWindow } from "./pet-window.js";
@@ -160,17 +160,37 @@ function load() {
   }
   if (movedApprovalMode) persist();
 }
-const snapshot = (record: MemberRecord): Snapshot => ({
+function accessible(actor: MemberRecord, id?: string, write = false) {
+  for (const record of index.members) {
+    const member = memberOf(record, id);
+    if (member && (record === actor || member.access === "edit" || !write && member.access === "view")) return { record, member };
+  }
+}
+function editable(actor: MemberRecord, id: string) {
+  const target = accessible(actor, id, true);
+  if (!target || actor.active !== id) throw new Error("没有此对话的编辑权限");
+  const host = windows.get(target.record.peer);
+  if (host?.closing || host?.saving) throw new Error("所有者窗口正在切换状态");
+  return target;
+}
+const snapshot = (record: MemberRecord): Snapshot => {
+  const conversations = index.members.flatMap(host => host.conversations.flatMap(group => {
+    const members = group.members.filter(m => host === record || m.access === "view" || m.access === "edit");
+    return members.length ? [{ ...group, members: members.map(m => ({ ...m, peer: host.peer })) }] : [];
+  }));
+  return {
   peer: record.peer, profile: { ...record.profile, externalHub: index.externalHub },
-  conversations: record.conversations, active: record.active,
-  sessions: Object.fromEntries(conversationsOf(record).map(member => [member.id, sessions[member.id]])),
+  conversations, active: accessible(record, record.active) ? record.active : undefined,
+  sessions: Object.fromEntries(conversations.flatMap(group => group.members.map(m => [m.id, sessions[m.id]]))),
   school, hasKey: Boolean(currentKey(record.peer, record.profile)), canStoreKey: secureStorageAvailable(),
   petsEnabled: petPreferences.enabled,
-});
+  };
+};
 const statePublisher = new StatePublisher();
 function publish(peer?: Peer) {
+  const shared = index.members.find(host => host.peer === peer)?.conversations.some(group => group.members.some(m => m.access === "edit" || m.access === "view"));
   for (const [id, { window, record }] of windows) {
-    if ((peer === undefined || id === peer) && !window.isDestroyed() && !window.webContents.isDestroyed()) {
+    if ((peer === undefined || id === peer || shared) && !window.isDestroyed() && !window.webContents.isDestroyed()) {
       statePublisher.publish(window.webContents, () => snapshot(record));
     }
   }
@@ -408,8 +428,8 @@ function start(record: MemberRecord, member: Member) {
   return worker;
 }
 function warm(record: MemberRecord) {
-  const member = memberOf(record, record.active);
-  if (member) start(record, member);
+  const target = accessible(record, record.active, true);
+  if (target) start(target.record, target.member);
 }
 function isRunning(state: SessionState) {
   return Boolean(state.pending || state.phase === "ready" && activeEvents(state.events).findLast(event => event.type === "status")?.data === "running");
@@ -475,7 +495,7 @@ function profileOf(value: Profile): Profile {
       permissions, allowedCommands, hookTimeout, steps, context, commandTimeout, outputLimit, turnTimeout, autoPause } };
 }
 function select({ window, record }: MemberWindow, id?: string) {
-  const member = memberOf(record, id);
+  const member = accessible(record, id)?.member;
   if (id && !member) throw new Error("找不到会话");
   record.active = id;
   if (member) record.cwd = member.cwd;
@@ -572,8 +592,16 @@ function memberApi(owner: MemberWindow): Omit<Api, "subscribe" | "members" | "op
       return add(owner, { id: randomUUID(), created: Date.now(), members: [{ id, cwd, directory: dirname(file), peer: record.peer }] });
     },
     async select(id) { select(owner, id); },
+    async setAccess(id, mode) {
+      const member = memberOf(record, id);
+      if (!member || !accessModes.includes(mode)) throw new Error("仅所有者可修改访问权限");
+      const previous = member.access;
+      member.access = mode;
+      try { persist(); } catch (cause) { member.access = previous; throw cause; }
+      publish();
+    },
     async setApprovalMode(id, mode) {
-      const member = id === record.active ? memberOf(record, id) : undefined;
+      const { member, record } = editable(owner.record, id);
       if (!member || !approvalModes.includes(mode)) throw new Error("无效的会话或权限模式");
       const previous = member.approvalMode;
       member.approvalMode = mode;
@@ -583,8 +611,7 @@ function memberApi(owner: MemberWindow): Omit<Api, "subscribe" | "members" | "op
     },
     async command(id, command) {
       if (owner.saving || owner.closing || changingHub || quitting) throw new Error("应用正在切换状态，请稍后重试");
-      if (id !== record.active) throw new Error("操作只适用于当前会话");
-      const member = memberOf(record, id);
+      const { record, member } = editable(owner.record, id);
       if (!member || !command || !["submit", "steer", "approve", "interrupt", "resume", "rollback"].includes(command.type)) {
         throw new Error("无效的会话操作");
       }
@@ -606,13 +633,14 @@ function memberApi(owner: MemberWindow): Omit<Api, "subscribe" | "members" | "op
       return start(record, member).send(command);
     },
     async retry(id) {
-      const member = memberOf(record, id);
+      const { record, member } = editable(owner.record, id);
       if (!member) throw new Error("找不到会话");
       const worker = workers.get(id);
       if (worker && sessions[id].events.findLast(item => item.type === "status")?.data !== "running") {
         workers.delete(id);
         await worker.close();
       }
+      editable(owner.record, id);
       await start(record, member).ready;
     },
     async peers(id) {
@@ -629,7 +657,7 @@ function memberApi(owner: MemberWindow): Omit<Api, "subscribe" | "members" | "op
       const profile = profileOf(value);
       const switchHub = index.externalHub !== profile.externalHub;
       if (owner.saving || changingHub || hasWork(record) || switchHub &&
-          [...windows.values()].some(other => other.saving || other.closing || hasWork(other.record))) {
+          (index.members.some(hasWork) || [...windows.values()].some(other => other.saving || other.closing))) {
         throw new Error("请先等受影响的会话结束，或中断回合。");
       }
       if (enteredKey !== undefined && typeof enteredKey !== "string") throw new Error("密钥格式无效");
@@ -637,7 +665,7 @@ function memberApi(owner: MemberWindow): Omit<Api, "subscribe" | "members" | "op
       changingHub = switchHub;
       try {
         if (saveKey && !secureStorageAvailable()) throw new Error("系统安全存储不可用");
-        const affected = switchHub ? [...windows.values()].map(item => item.record) : [record];
+        const affected = switchHub ? index.members : [record];
         await Promise.all(affected.map(stopWorkers));
         if (switchHub) await stopHub();
         if (clear) {
@@ -784,7 +812,7 @@ async function prepareQuit() {
     quitting = false;
     return;
   }
-  await Promise.all([...windows.values()].map(owner => stopWorkers(owner.record)));
+  await Promise.all(index.members.map(stopWorkers));
   await stopHub();
   pets.close();
   credentials.clear();
@@ -807,7 +835,7 @@ function registerApi() {
   };
   const channels: Array<keyof Omit<Api, "subscribe" | "watchState" | "ackState">> = [
     "members", "openMember", "memberPicker", "state", "folder", "create", "importSession",
-    "select", "setApprovalMode", "command", "retry", "peers", "importProfile", "saveProfile", "artifact", "confirm", "setPetsEnabled",
+    "select", "setAccess", "setApprovalMode", "command", "retry", "peers", "importProfile", "saveProfile", "artifact", "confirm", "setPetsEnabled",
   ];
   for (const name of channels) ipcMain.handle("teamhub:" + name, async (event, ...args) => {
     try {

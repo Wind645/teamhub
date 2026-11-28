@@ -328,6 +328,36 @@ async function settled(page, status = "completed") {
   await expect.poll(async () => (await current(page))?.events.findLast(e => e.type === "status")?.data, { timeout: 15_000 }).toBe(status);
 }
 
+test("conversation sharing enforces live owner-only access changes", { timeout: 65000 }, async () => {
+  const data = await appData();
+  const project = join(data, "shared project");
+  await mkdir(project);
+  const { app, page: owner } = await launch(data, [project]);
+  try {
+    await newSession(owner);
+    await submit(owner, "生成一份报告");
+    await expect(approval(owner)).toBeVisible();
+    const id = (await state(owner)).active;
+    const guest = await createMember(app, await menuPicker(app), "guest");
+    assert.equal((await state(guest)).sessions[id], undefined);
+    const access = owner.getByLabel("对话访问权限");
+    await access.selectOption("view");
+    await guest.getByRole("button", { name: /tester · 生成一份报告/ }).click();
+    await expect(task(guest)).toHaveCount(0);
+    const interrupt = () => guest.evaluate(id => window.teamhub.command(id, { type: "interrupt" }), id);
+    await assert.rejects(interrupt, /编辑权限/);
+    await access.selectOption("edit");
+    await expect(task(guest)).toBeVisible();
+    await assert.rejects(guest.evaluate(id => window.teamhub.setAccess(id, "private"), id), /所有者/);
+    await interrupt();
+    await settled(owner, "interrupted");
+    await access.selectOption("private");
+    await expect(guest.locator(".session-button")).toHaveCount(0);
+    assert.equal((await state(guest)).sessions[id], undefined);
+    await assert.rejects(interrupt, /编辑权限/);
+  } finally { await app.close(); }
+});
+
 test("composer approval modes are independent per conversation and persist across restarts", { timeout: 85_000 }, async () => {
   const data = await appData();
   const project = join(data, "permissions project");

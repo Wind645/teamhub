@@ -84,6 +84,13 @@ pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto;
 .topbar-title strong { white-space: nowrap; font-size: 15px; }
 .topbar-title code, .model-label, .tool-title, .tool-title span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .topbar-title code { color: var(--muted); font-size: 12px; }
+.access-picker { position: relative; display: inline-flex; flex: none; align-items: center; color: var(--muted); }
+.access-picker select {
+  appearance: none; height: 34px; padding: 0 24px 0 8px; border: 0; border-radius: 6px;
+  background: transparent; color: inherit; font: inherit; font-size: 13px; cursor: pointer;
+}
+.access-picker select:hover { background: var(--hover); }
+.access-picker svg { position: absolute; right: 7px; pointer-events: none; }
 .model-label { min-width: 0; flex: 0 0 auto; max-width: 26%; font-size: 13px; color: var(--muted); }
 .mobile-nav, .nav-backdrop { display: none; }
 .new-scroll { flex: 1; min-height: 0; overflow: auto; display: flex; padding: 32px 24px; }
